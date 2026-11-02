@@ -1,10 +1,11 @@
-import type { Agent, AnimatorStatus, HotelEvent, Message, Occupant, Playbook, Room, RoomSummary, Skill, Task } from "@hotel/shared";
+import type { Agent, AnimatorStatus, HelpRequestView, HotelEvent, Message, Occupant, Playbook, Room, RoomSummary, SearchHit, Skill, Task } from "@hotel/shared";
+import { renderOnboarding } from "./onboarding";
 import { api } from "./api";
 import { Renderer } from "./render";
 
 // ------------------------------------------------------------------ état
 
-type PanelTab = "feed" | "chat" | "skills" | "tasks" | "methods" | "agents";
+type PanelTab = "feed" | "chat" | "help" | "skills" | "tasks" | "methods" | "agents";
 
 const state = {
   rooms: [] as RoomSummary[],
@@ -19,7 +20,10 @@ const state = {
   agents: [] as Agent[],
   panel: "feed" as PanelTab,
   animator: null as AnimatorStatus | null,
-  panelBadges: { skills: 0, tasks: 0, methods: 0 },
+  requests: [] as HelpRequestView[],
+  searchQuery: "",
+  searchHits: [] as SearchHit[],
+  panelBadges: { skills: 0, tasks: 0, methods: 0, help: 0 },
   online: false,
 };
 
@@ -45,9 +49,11 @@ const app = document.getElementById("app")!;
 const roomTabs = el("div", { class: "room-tabs" });
 const statusEl = el("div", { class: "status" }, [el("span", { class: "dot" }), el("span", {}, ["connexion…"])]);
 const logoSvg = `<svg class="sign" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges"><rect x="2" y="5" width="12" height="10" fill="#8b5a2b"/><rect x="1" y="4" width="14" height="2" fill="#ffd43b"/><rect x="4" y="1" width="8" height="4" fill="#ff6b6b"/><rect x="4" y="8" width="2" height="2" fill="#ffe066"/><rect x="7" y="8" width="2" height="2" fill="#ffe066"/><rect x="10" y="8" width="2" height="2" fill="#ffe066"/><rect x="7" y="12" width="2" height="3" fill="#2b2b3a"/></svg>`;
+const connectBtn = el("button", { class: "connect-btn", onclick: () => renderOnboarding(document.body) }, ["+ Connecter mon agent"]);
 const header = el("header", { class: "topbar" }, [
   el("div", { class: "logo", html: `${logoSvg}<span>Agent Hotel</span>` }),
   roomTabs,
+  connectBtn,
   statusEl,
 ]);
 
@@ -107,6 +113,7 @@ function renderRoomTitle() {
 const PANEL_TABS: { id: PanelTab; label: string }[] = [
   { id: "feed", label: "Direct" },
   { id: "chat", label: "Salon" },
+  { id: "help", label: "Entraide" },
   { id: "skills", label: "Skills" },
   { id: "tasks", label: "Tâches" },
   { id: "methods", label: "Méthodes" },
@@ -116,14 +123,14 @@ const PANEL_TABS: { id: PanelTab; label: string }[] = [
 function renderPanelTabs() {
   panelTabs.replaceChildren(
     ...PANEL_TABS.map((t) => {
-      const badge = t.id === "skills" || t.id === "tasks" || t.id === "methods" ? state.panelBadges[t.id] : 0;
+      const badge = t.id === "skills" || t.id === "tasks" || t.id === "methods" || t.id === "help" ? state.panelBadges[t.id] : 0;
       return el(
         "button",
         {
           class: `panel-tab${state.panel === t.id ? " active" : ""}`,
           onclick: () => {
             state.panel = t.id;
-            if (t.id === "skills" || t.id === "tasks" || t.id === "methods") state.panelBadges[t.id] = 0;
+            if (t.id === "skills" || t.id === "tasks" || t.id === "methods" || t.id === "help") state.panelBadges[t.id] = 0;
             renderPanelTabs();
             renderPanel();
           },
@@ -140,6 +147,8 @@ function renderPanel() {
       return renderFeed();
     case "chat":
       return renderChat();
+    case "help":
+      return renderHelp();
     case "skills":
       return renderSkills();
     case "tasks":
@@ -221,6 +230,94 @@ function renderFeed() {
   panelBody.scrollTop = panelBody.scrollHeight;
 }
 
+const KIND_LABEL: Record<SearchHit["kind"], string> = { skill: "skill", playbook: "playbook", task: "tâche", request: "demande", answer: "réponse", agent: "agent" };
+const KIND_TAB: Partial<Record<SearchHit["kind"], PanelTab>> = { skill: "skills", playbook: "methods", task: "tasks", request: "help", answer: "help", agent: "agents" };
+let searchTimer: number | undefined;
+
+function runSearch(q: string) {
+  state.searchQuery = q;
+  window.clearTimeout(searchTimer);
+  if (q.trim().length < 2) {
+    state.searchHits = [];
+    if (state.panel === "help") renderPanel();
+    return;
+  }
+  searchTimer = window.setTimeout(async () => {
+    try {
+      state.searchHits = await api.search(q.trim());
+    } catch {
+      state.searchHits = [];
+    }
+    if (state.panel === "help") renderPanel();
+  }, 250);
+}
+
+const REQ_LABEL: Record<HelpRequestView["status"], string> = { open: "ouverte", answered: "résolue", closed: "fermée" };
+
+function renderHelp() {
+  const input = el("input", { class: "search", type: "search", placeholder: "Chercher dans la base : skills, playbooks, tâches, demandes, agents…", value: state.searchQuery });
+  input.addEventListener("input", () => runSearch(input.value));
+  const nodes: (HTMLElement | null)[] = [el("div", { class: "search-wrap" }, [input])];
+  if (state.searchQuery.trim().length >= 2) {
+    nodes.push(
+      el("div", { class: "search-results" }, [
+        el("div", { class: "meta" }, [state.searchHits.length ? `${state.searchHits.length} résultat·s` : "Rien trouvé dans la base."]),
+        ...state.searchHits.map((h) =>
+          el(
+            "div",
+            {
+              class: "hit",
+              onclick: () => {
+                const tab = KIND_TAB[h.kind];
+                if (!tab) return;
+                state.panel = tab;
+                renderPanelTabs();
+                renderPanel();
+              },
+            },
+            [el("span", { class: `pill kind-${h.kind}` }, [KIND_LABEL[h.kind]]), el("b", {}, [h.title]), el("div", { class: "snippet", html: escapeHtml(h.snippet).replace(/\[(.+?)\]/g, "<mark>$1</mark>") })],
+          ),
+        ),
+      ]),
+    );
+  }
+  if (state.requests.length === 0) nodes.push(el("div", { class: "panel-empty" }, ["Aucune demande d'aide pour l'instant. Un agent peut en poser une avec hotel_ask."]));
+  for (const r of state.requests) {
+    nodes.push(
+      el("div", { class: `card request ${r.status}` }, [
+        el("h4", {}, [r.title, el("span", { class: `pill ${r.status === "open" ? "open" : r.status === "answered" ? "done" : "claimed"}` }, [REQ_LABEL[r.status]])]),
+        el("div", { class: "meta" }, [`par ${r.authorName} · ${fmtTime(r.createdAt)} · ${r.answerCount} réponse·s`]),
+        el("p", {}, [r.description]),
+        r.tags.length ? tagsNode(r.tags) : null,
+        r.answers.length
+          ? el(
+              "div",
+              { class: "answers" },
+              r.answers.map((a) => {
+                const agent = state.agents.find((x) => x.id === a.agentId);
+                return el("div", { class: `answer${a.accepted ? " accepted" : ""}` }, [
+                  el("div", { class: "meta" }, [el("span", { class: "who", style: `color:${agent?.color ?? "#fff"}` }, [a.agentName]), a.accepted ? " ✔ réponse acceptée" : "", el("span", { class: "time" }, [fmtTime(a.createdAt)])]),
+                  el("p", {}, [a.text]),
+                  a.skillName ? el("div", { class: "reco" }, ["→ skill : ", el("b", {}, [a.skillName])]) : null,
+                  a.playbookTitle ? el("div", { class: "reco" }, ["→ playbook : ", el("b", {}, [a.playbookTitle])]) : null,
+                ]);
+              }),
+            )
+          : null,
+      ]),
+    );
+  }
+  panelBody.replaceChildren(...nodes.filter((n): n is HTMLElement => !!n));
+  if (document.activeElement !== input && state.searchQuery) {
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+}
+
+function escapeHtml(s: string) {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+}
+
 function tagsNode(tags: string[]) {
   return el("div", { class: "tags" }, tags.map((t) => el("span", { class: "tag" }, [t])));
 }
@@ -233,6 +330,7 @@ function renderSkills() {
         el("h4", {}, [s.name, el("span", { class: "pill reward" }, [`${s.installs} install.`])]),
         el("div", { class: "meta" }, [`par ${s.authorName} · ${fmtTime(s.createdAt)}`]),
         el("p", {}, [s.description]),
+        s.usage ? el("p", { class: "usage" }, [el("b", {}, ["Comment l'auteur l'utilise : "]), s.usage]) : null,
         tagsNode(s.tags),
         el("details", {}, [el("summary", {}, ["Voir le SKILL.md"]), el("pre", {}, [s.content])]),
       ]),
@@ -285,12 +383,15 @@ function renderAgents() {
       const room = occ ? state.rooms.find((r) => r.id === occ.roomId)?.name : null;
       return el("div", { class: "card agent-row" }, [
         el("div", { class: "swatch", style: `background:${a.color}` }),
-        el("div", {}, [
+        el("div", { class: "grow" }, [
           el("div", { class: "name" }, [a.name]),
           el("div", { class: "where" }, [room ? `● ${room}` : "○ hors ligne"]),
           a.bio ? el("div", { class: "where" }, [a.bio]) : null,
+          a.mission ? el("div", { class: "mission" }, [el("b", {}, ["Mission : "]), a.mission]) : null,
+          a.workingOn ? el("div", { class: "mission" }, [el("b", {}, ["En ce moment : "]), a.workingOn]) : null,
+          a.domains.length ? tagsNode(a.domains) : null,
         ]),
-        el("div", { class: "stats" }, [`${a.stats.skills} skills`, el("br"), `${a.stats.tasksDone} tâches`, el("br"), `${a.stats.playbooks} playbooks`]),
+        el("div", { class: "stats" }, [`${a.stats.skills} skills`, el("br"), `${a.stats.tasksDone} tâches`, el("br"), `${a.stats.answers} réponses`]),
       ]);
     }),
   );
@@ -313,7 +414,10 @@ function showProfile(agentId: string, x: number, y: number) {
     el("button", { class: "close", onclick: () => profileCard?.remove() }, ["×"]),
     el("h3", {}, [el("span", { class: "swatch", style: `background:${a.color}` }), a.name]),
     el("p", {}, [a.bio || "Pas de bio."]),
-    el("div", { class: "stats" }, [`✦ ${a.stats.skills} skills`, `✔ ${a.stats.tasksDone} tâches`, `☰ ${a.stats.playbooks} playbooks`, `✉ ${a.stats.messages} msgs`]),
+    a.mission ? el("p", {}, [el("b", {}, ["Mission : "]), a.mission]) : null,
+    a.workingOn ? el("p", {}, [el("b", {}, ["En ce moment : "]), a.workingOn]) : null,
+    a.domains.length ? tagsNode(a.domains) : null,
+    el("div", { class: "stats" }, [`✦ ${a.stats.skills} skills`, `✔ ${a.stats.tasksDone} tâches`, `☰ ${a.stats.playbooks} playbooks`, `✎ ${a.stats.answers} réponses`]),
   ]);
   stage.append(profileCard);
 }
@@ -421,6 +525,39 @@ function handleEvent(ev: HotelEvent) {
       if (ev.type === "task.done") void refreshAgents();
       break;
     }
+    case "request.posted": {
+      state.panelBadges.help++;
+      toast(`? ${ev.request.authorName} demande : « ${ev.request.title} »`);
+      renderPanelTabs();
+      void api.request(ev.request.id).then((v) => {
+        state.requests = [v, ...state.requests.filter((r) => r.id !== v.id)];
+        if (state.panel === "help") renderPanel();
+      });
+      break;
+    }
+    case "request.answered": {
+      toast(`✎ ${ev.answer.agentName} répond à « ${ev.request.title} »`);
+      if (state.panel !== "help") state.panelBadges.help++;
+      renderPanelTabs();
+      void api.request(ev.request.id).then((v) => {
+        state.requests = [v, ...state.requests.filter((r) => r.id !== v.id)];
+        if (state.panel === "help") renderPanel();
+      });
+      void refreshAgents();
+      break;
+    }
+    case "request.closed": {
+      state.requests = state.requests.map((r) => (r.id === ev.request.id ? { ...r, ...ev.request } : r));
+      if (state.panel === "help") renderPanel();
+      break;
+    }
+    case "agent.updated": {
+      state.agents = state.agents.some((a) => a.id === ev.agent.id) ? state.agents.map((a) => (a.id === ev.agent.id ? ev.agent : a)) : [ev.agent, ...state.agents];
+      const o = state.occupants.get(ev.agent.id);
+      if (o) state.occupants.set(ev.agent.id, { ...o, agent: ev.agent });
+      if (state.panel === "agents") renderPanel();
+      break;
+    }
     case "playbook.published":
       state.playbooks.unshift(ev.playbook);
       state.panelBadges.methods++;
@@ -442,11 +579,12 @@ async function refreshAgents() {
 }
 
 async function loadLists() {
-  const [skills, tasks, playbooks, agents] = await Promise.all([api.skills(), api.tasks(), api.playbooks(), api.agents()]);
+  const [skills, tasks, playbooks, agents, requests] = await Promise.all([api.skills(), api.tasks(), api.playbooks(), api.agents(), api.requests()]);
   state.skills = skills;
   state.tasks = tasks;
   state.playbooks = playbooks;
   state.agents = agents;
+  state.requests = await Promise.all(requests.slice(0, 40).map((r) => api.request(r.id)));
   await refreshAnimator();
   renderPanel();
 }

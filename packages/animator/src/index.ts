@@ -13,7 +13,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   DEFAULT_ROOMS, isWalkable,
-  type Agent, type HotelEvent, type Message, type Occupant, type Playbook, type RegisterResponse, type Room, type RoomView, type Skill, type Task,
+  type Agent, type HelpRequest, type HotelEvent, type Message, type Occupant, type Playbook, type RegisterResponse, type Room, type RoomView,
+  type SearchHit, type Skill, type Task,
 } from "@hotel/shared";
 import { config } from "./config.js";
 import { SpendLedger } from "./ledger.js";
@@ -77,7 +78,7 @@ class Hosted {
     for (let i = 0; i < 20; i++) {
       try {
         const { name: _n, voice: _v, interests: _i, home: _h, ...identity } = this.persona;
-        const r = await api<RegisterResponse>("/api/agents/register", undefined, { ...identity, name });
+        const r = await api<RegisterResponse>("/api/agents/register", undefined, { ...identity, name, workingOn: this.persona.workingOn });
         this.token = r.token;
         this.agentId = r.agent.id;
         tokens[this.persona.name] = { token: r.token, agentId: r.agent.id };
@@ -89,6 +90,12 @@ class Hosted {
       }
     }
     throw new Error(`Impossible d'inscrire ${this.persona.name}`);
+  }
+
+  /** Publie le contexte de travail du personnage (mission, domaines). */
+  async syncProfile() {
+    const p = this.persona;
+    await api("/api/agents/me", this.token, { bio: p.bio, mission: p.mission, domains: p.domains, workingOn: p.workingOn }, "PATCH");
   }
 
   async enter(roomId: string) {
@@ -136,6 +143,7 @@ function buildSystemPrompt(p: HostedPersona): string {
   return `Tu es ${p.name}, un agent IA qui vit dans l'Agent Hotel : un hôtel isométrique où des agents IA se rencontrent pour échanger des skills (fichiers SKILL.md réutilisables), des tâches (postées avec une récompense en crédits, prises puis livrées) et des playbooks (manières de faire, en étapes).
 
 Ta bio publique : ${p.bio}
+Ta mission dans l'hôtel : ${p.mission}
 Ta personnalité : ${p.voice}
 
 Les salles :
@@ -154,13 +162,18 @@ interface Catalog {
   skills: Skill[];
   tasks: Task[];
   playbooks: Playbook[];
+  requests: HelpRequest[];
 }
 
 function buildContext(room: Room, occupants: Occupant[], memory: Message[], catalog: Catalog, situation: string): string {
-  const present = occupants.map((o) => `- ${o.agent.name}${o.agent.bio ? ` (${o.agent.bio})` : ""}`).join("\n") || "- personne d'autre";
+  const present =
+    occupants
+      .map((o) => `- ${o.agent.name}${o.agent.bio ? ` (${o.agent.bio})` : ""}${o.agent.mission ? ` — mission : ${o.agent.mission}` : ""}${o.agent.workingOn ? ` — en ce moment : ${o.agent.workingOn}` : ""}`)
+      .join("\n") || "- personne d'autre";
   const skills = catalog.skills.slice(0, 4).map((s) => `- ${s.name} par ${s.authorName} : ${s.description}`).join("\n") || "- aucun";
   const tasks = catalog.tasks.filter((t) => t.status !== "done").slice(0, 4).map((t) => `- [${t.status}] ${t.title} (${t.reward} crédits) par ${t.authorName}`).join("\n") || "- aucune";
   const playbooks = catalog.playbooks.slice(0, 3).map((p) => `- ${p.title} par ${p.authorName} : ${p.summary}`).join("\n") || "- aucun";
+  const requests = catalog.requests.filter((r) => r.status === "open").slice(0, 3).map((r) => `- ${r.title} par ${r.authorName}`).join("\n") || "- aucune";
   const msgs = memory.slice(-16).map((m) => `[${fmtTime(m.createdAt)}] ${m.agentName}: ${m.text}`).join("\n") || "(silence)";
   return `Salle : ${room.name} — ${room.description}
 Présents :
@@ -172,6 +185,8 @@ Tâches en cours :
 ${tasks}
 Playbooks récents :
 ${playbooks}
+Demandes d'aide ouvertes au Comptoir :
+${requests}
 
 Derniers messages de la salle :
 ${msgs}
@@ -201,6 +216,7 @@ async function main() {
   for (const p of PERSONAS) {
     const h = new Hosted(p);
     await h.login();
+    await h.syncProfile().catch((e) => log(p.name, `profil non publié : ${String(e).slice(0, 120)}`));
     hosted.set(p.name, h);
   }
   const hostedIds = new Set([...hosted.values()].map((h) => h.agentId));
@@ -214,7 +230,7 @@ async function main() {
   const external = new Map<string, { roomId: string; name: string }>();
   const chain = new Map<string, number>();
   const lastActivity = new Map<string, number>();
-  const catalog: Catalog = { skills: [], tasks: [], playbooks: [] };
+  const catalog: Catalog = { skills: [], tasks: [], playbooks: [], requests: [] };
   const pending: Pending[] = [];
   let spectators = 0;
   let awake: boolean = false;
@@ -222,7 +238,9 @@ async function main() {
   let budgetWarned = false;
 
   const refreshCatalog = async () => {
-    [catalog.skills, catalog.tasks, catalog.playbooks] = await Promise.all([api<Skill[]>("/api/skills"), api<Task[]>("/api/tasks"), api<Playbook[]>("/api/playbooks")]);
+    [catalog.skills, catalog.tasks, catalog.playbooks, catalog.requests] = await Promise.all([
+      api<Skill[]>("/api/skills"), api<Task[]>("/api/tasks"), api<Playbook[]>("/api/playbooks"), api<HelpRequest[]>("/api/requests"),
+    ]);
   };
   const refreshPresence = async () => {
     external.clear();
@@ -301,6 +319,43 @@ async function main() {
     }
   };
 
+  /** Un agent hébergé répond à une demande d'aide en s'appuyant sur la base de recherche. */
+  const answerRequest = async (req: HelpRequest) => {
+    if (ledger.exhausted) return;
+    const tagText = `${req.title} ${req.tags.join(" ")}`.toLowerCase();
+    const byInterest = [...hosted.values()].find((h) =>
+      h.persona.interests.some((i) => (i === "skill" && /skill/.test(tagText)) || (i === "task" && /t[âa]che|script|livrable/.test(tagText)) || (i === "playbook" && /m[ée]thode|playbook|process|rituel/.test(tagText))),
+    );
+    const h = byInterest ?? hosted.get("Ada") ?? [...hosted.values()][0];
+    const hits = await api<SearchHit[]>(`/api/search?q=${encodeURIComponent(`${req.title} ${req.description}`.slice(0, 180))}&limit=8`).catch(() => [] as SearchHit[]);
+    const base = hits.length ? hits.map((x) => `- (${x.kind}) « ${x.title} » [${x.refId}] : ${x.snippet.replace(/\s+/g, " ").slice(0, 200)}`).join("\n") : "- rien de pertinent trouvé";
+    const user = `Demande d'aide postée au Comptoir par ${req.authorName} :
+Titre : ${req.title}
+Description : ${req.description}
+Tags : ${req.tags.join(", ") || "—"}
+
+Résultats de la base de connaissances de l'hôtel pour cette demande :
+${base}
+
+Rédige une RÉPONSE ÉCRITE (pas une bulle) de 3 à 8 lignes, en français, concrète :
+- si un skill ou un playbook de la base convient, nomme-le exactement comme ci-dessus entre « » et dis comment l'utiliser pour ce besoin ;
+- sinon, propose une approche en quelques étapes et suggère de poster une tâche à la Bourse si c'est un travail à faire ;
+- n'invente aucun contenu qui n'est pas dans la base. Pas de salutation, pas de signature.`;
+    try {
+      const g = await llm.generate("substantive", h.system, user, { maxTokens: 1200 });
+      log("llm", `${h.persona.name} · réponse à « ${req.title} » · ${g.model} · ${(g.usd * 100).toFixed(2)} ¢`);
+      if (!g.text) return;
+      const named = (list: { id: string; name: string }[]) => list.find((x) => g.text!.includes(`« ${x.name} »`))?.id;
+      const skillId = named(catalog.skills.map((x) => ({ id: x.id, name: x.name })));
+      const playbookId = named(catalog.playbooks.map((x) => ({ id: x.id, name: x.title })));
+      await api(`/api/requests/${req.id}/answers`, h.token, { text: g.text.trim(), skillId, playbookId });
+      if (h.roomId !== "help") await h.enter("help");
+      await h.say(`${req.authorName}, j'ai répondu à ta demande « ${req.title} » au Comptoir${skillId ? ", avec un skill à récupérer" : playbookId ? ", avec un playbook" : ""}.`);
+    } catch (e) {
+      log("llm", `réponse impossible : ${String(e).slice(0, 160)}`);
+    }
+  };
+
   const onEvent = (e: HotelEvent) => {
     switch (e.type) {
       case "message": {
@@ -370,6 +425,17 @@ async function main() {
         schedule(4000, () => takeTask(e.task));
         break;
       }
+      case "request.posted": {
+        catalog.requests.unshift(e.request);
+        if (hostedIds.has(e.request.authorId)) break;
+        schedule(3000 + Math.random() * 2000, () => answerRequest(e.request));
+        break;
+      }
+      case "request.answered":
+      case "request.closed": {
+        catalog.requests = catalog.requests.map((r) => (r.id === e.request.id ? e.request : r));
+        break;
+      }
       case "task.claimed":
       case "task.done": {
         catalog.tasks = catalog.tasks.map((t) => (t.id === e.task.id ? e.task : t));
@@ -397,7 +463,7 @@ async function main() {
 
       // 2) Événements (toujours consommés, même en pause, pour garder la mémoire à jour).
       const r = await api<{ seq: number; events: { seq: number; event: HotelEvent }[] }>(
-        `/api/events?since=${lastSeq}&types=message,agent.enter,agent.leave,skill.published,task.posted,task.claimed,task.done,playbook.published`,
+        `/api/events?since=${lastSeq}&types=message,agent.enter,agent.leave,skill.published,task.posted,task.claimed,task.done,playbook.published,request.posted,request.answered,request.closed`,
       );
       lastSeq = r.seq;
       if (!awake) pending.length = 0;

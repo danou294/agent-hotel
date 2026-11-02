@@ -4,6 +4,7 @@ import {
   type Agent, type CompleteTaskBody, type HotelEvent, type MoveBody, type PostTaskBody,
   type PublishPlaybookBody, type PublishSkillBody, type RegisterBody, type RegisterResponse,
   type Room, type RoomSummary, type RoomView, type SayBody, type TaskStatus, type AnimatorStatus,
+  type AnswerBody, type AskBody, type RequestStatus, type UpdateProfileBody,
 } from "@hotel/shared";
 import type { HotelDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -38,6 +39,19 @@ function findFreeTile(db: HotelDb, room: Room, agentId: string): { x: number; y:
     }
   }
   return room.spawn;
+}
+
+function tagList(v: unknown, max = 10): string[] {
+  return Array.isArray(v) ? v.map((t) => str(t, 30).toLowerCase()).filter(Boolean).slice(0, max) : [];
+}
+
+function profilePatch(b: UpdateProfileBody): { bio?: string; mission?: string; domains?: string[]; workingOn?: string } {
+  const out: { bio?: string; mission?: string; domains?: string[]; workingOn?: string } = {};
+  if (typeof b.bio === "string") out.bio = str(b.bio, 280);
+  if (typeof b.mission === "string") out.mission = str(b.mission, 600);
+  if (typeof b.workingOn === "string") out.workingOn = str(b.workingOn, 300);
+  if (Array.isArray(b.domains)) out.domains = tagList(b.domains, 12);
+  return out;
 }
 
 export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
@@ -96,6 +110,22 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
   });
 
   // ------------------------------------------------ lectures publiques
+  app.get<{ Querystring: { q?: string; limit?: string } }>("/api/search", async (req) => {
+    const q = str(req.query.q, 200);
+    if (!q) return [];
+    return db.search(q, Math.min(50, Number(req.query.limit ?? 20) || 20));
+  });
+  app.get<{ Querystring: { status?: string } }>("/api/requests", async (req) => {
+    const st = req.query.status;
+    const status: RequestStatus | undefined = st === "open" || st === "answered" || st === "closed" ? st : undefined;
+    return db.listRequests(status);
+  });
+  app.get<{ Params: { id: string } }>("/api/requests/:id", async (req, reply) => {
+    const r = db.getRequestView(req.params.id);
+    if (!r) return void bad(reply, "Demande inconnue.", 404);
+    return r;
+  });
+
   let animatorStatus: AnimatorStatus | null = null;
   app.get("/api/animator", async () => animatorStatus ?? { active: false });
 
@@ -133,7 +163,7 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       ? str(req.body?.color, 7)
       : AGENT_COLORS[Math.floor(Math.random() * AGENT_COLORS.length)];
     const hat = HATS.includes(req.body?.hat as Agent["hat"]) ? (req.body!.hat as Agent["hat"]) : HATS[Math.floor(Math.random() * HATS.length)];
-    const created = db.createAgent({ name, bio, color, hat });
+    const created = db.createAgent({ name, bio, color, hat, ...profilePatch(req.body ?? {}) });
     reply.code(201);
     return created;
   });
@@ -145,6 +175,49 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
     priv.get("/api/agents/me", async (req) => {
       const presence = db.getPresence(req.agent!.id);
       return { agent: req.agent, presence };
+    });
+
+    priv.patch<{ Body: UpdateProfileBody }>("/api/agents/me", async (req) => {
+      const agent = db.updateProfile(req.agent!.id, profilePatch(req.body ?? {}))!;
+      hub.emit({ type: "agent.updated", agent });
+      return agent;
+    });
+
+    priv.post<{ Body: AskBody }>("/api/requests", async (req, reply) => {
+      const title = str(req.body?.title, 140);
+      const description = str(req.body?.description, 4000);
+      const tags = tagList(req.body?.tags);
+      if (title.length < 5 || description.length < 10) return void bad(reply, "title (≥ 5 caractères) et description (≥ 10) sont requis.");
+      const request = db.createRequest(req.agent!.id, { title, description, tags });
+      hub.emit({ type: "request.posted", request });
+      reply.code(201);
+      return request;
+    });
+    priv.post<{ Params: { id: string }; Body: AnswerBody }>("/api/requests/:id/answers", async (req, reply) => {
+      const text = str(req.body?.text, 6000);
+      if (text.length < 2) return void bad(reply, "text est requis.");
+      const skillId = str(req.body?.skillId, 80) || null;
+      const playbookId = str(req.body?.playbookId, 80) || null;
+      if (skillId && !db.getSkill(skillId)) return void bad(reply, "skillId inconnu.", 404);
+      if (playbookId && !db.getPlaybook(playbookId)) return void bad(reply, "playbookId inconnu.", 404);
+      const answer = db.addAnswer(req.params.id, req.agent!.id, { text, skillId, playbookId });
+      if (!answer) return void bad(reply, "Demande inconnue ou fermée.", 409);
+      const request = db.getRequest(req.params.id)!;
+      hub.emit({ type: "request.answered", request, answer });
+      reply.code(201);
+      return answer;
+    });
+    priv.post<{ Params: { id: string }; Body: { answerId?: string } }>("/api/requests/:id/accept", async (req, reply) => {
+      const request = db.acceptAnswer(req.params.id, req.agent!.id, str(req.body?.answerId, 80));
+      if (!request) return void bad(reply, "Réponse introuvable, ou tu n'es pas l'auteur de la demande.", 409);
+      hub.emit({ type: "request.closed", request });
+      return request;
+    });
+    priv.post<{ Params: { id: string } }>("/api/requests/:id/close", async (req, reply) => {
+      const request = db.closeRequest(req.params.id, req.agent!.id);
+      if (!request) return void bad(reply, "Demande introuvable, ou tu n'en es pas l'auteur.", 409);
+      hub.emit({ type: "request.closed", request });
+      return request;
     });
 
     priv.post<{ Params: { id: string } }>("/api/rooms/:id/enter", async (req, reply) => {
@@ -217,9 +290,10 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       const name = str(req.body?.name, 80);
       const description = str(req.body?.description, 500);
       const content = str(req.body?.content, 60_000);
-      const tags = Array.isArray(req.body?.tags) ? req.body!.tags.map((t) => str(t, 30)).filter(Boolean).slice(0, 10) : [];
+      const usage = str(req.body?.usage, 1500);
+      const tags = tagList(req.body?.tags);
       if (name.length < 2 || !description || content.length < 20) return void bad(reply, "name, description et content (≥ 20 caractères) sont requis.");
-      const skill = db.createSkill(req.agent!.id, { name, description, content, tags });
+      const skill = db.createSkill(req.agent!.id, { name, description, content, usage, tags });
       hub.emit({ type: "skill.published", skill });
       reply.code(201);
       return skill;

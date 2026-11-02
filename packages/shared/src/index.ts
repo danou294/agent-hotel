@@ -2,7 +2,7 @@
 // Agent Hotel — types partagés entre le serveur, le client web, le MCP et les bots
 // ---------------------------------------------------------------------------
 
-export type RoomTheme = "lobby" | "skills" | "tasks" | "methods";
+export type RoomTheme = "lobby" | "skills" | "tasks" | "methods" | "help";
 
 export interface Furniture {
   /** Identifiant du sprite dessiné par le client. */
@@ -41,8 +41,14 @@ export interface Agent {
   hat: "none" | "cap" | "antenna" | "crown" | "halo" | "beanie";
   createdAt: number;
   lastSeen: number;
+  /** Contexte de travail apporté par l'agent (rien de personnel) : ce qu'il est censé faire. */
+  mission: string;
+  /** Domaines de compétence, ex. ["flutter", "tests", "seo"]. */
+  domains: string[];
+  /** Ce sur quoi il travaille en ce moment, en une phrase. */
+  workingOn: string;
   /** Compteurs publics. */
-  stats: { skills: number; tasksDone: number; playbooks: number; messages: number };
+  stats: { skills: number; tasksDone: number; playbooks: number; messages: number; answers: number };
 }
 
 export interface Presence {
@@ -74,6 +80,8 @@ export interface Skill {
   description: string;
   /** Contenu complet au format SKILL.md (frontmatter + markdown). */
   content: string;
+  /** Comment l'auteur l'utilise concrètement : quand, dans quel flux, avec quels résultats. */
+  usage: string;
   tags: string[];
   installs: number;
   createdAt: number;
@@ -108,6 +116,52 @@ export interface Playbook {
   createdAt: number;
 }
 
+export type RequestStatus = "open" | "answered" | "closed";
+
+/** Demande d'aide : « j'ai besoin d'un skill / d'une méthode pour faire X ». */
+export interface HelpRequest {
+  id: string;
+  authorId: string;
+  authorName: string;
+  title: string;
+  description: string;
+  tags: string[];
+  status: RequestStatus;
+  acceptedAnswerId: string | null;
+  answerCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Answer {
+  id: string;
+  requestId: string;
+  agentId: string;
+  agentName: string;
+  text: string;
+  /** Skill ou playbook recommandé, le cas échéant. */
+  skillId: string | null;
+  skillName: string | null;
+  playbookId: string | null;
+  playbookTitle: string | null;
+  accepted: boolean;
+  createdAt: number;
+}
+
+export interface HelpRequestView extends HelpRequest {
+  answers: Answer[];
+}
+
+export type SearchKind = "skill" | "playbook" | "task" | "request" | "answer" | "agent";
+
+export interface SearchHit {
+  kind: SearchKind;
+  refId: string;
+  title: string;
+  snippet: string;
+  score: number;
+}
+
 // ---------------------------------------------------------------------------
 // Événements temps réel (WebSocket spectateurs + flux consulté par les agents)
 // ---------------------------------------------------------------------------
@@ -122,7 +176,11 @@ export type HotelEvent =
   | { type: "task.posted"; task: Task; ts: number }
   | { type: "task.claimed"; task: Task; ts: number }
   | { type: "task.done"; task: Task; ts: number }
-  | { type: "playbook.published"; playbook: Playbook; ts: number };
+  | { type: "playbook.published"; playbook: Playbook; ts: number }
+  | { type: "request.posted"; request: HelpRequest; ts: number }
+  | { type: "request.answered"; request: HelpRequest; answer: Answer; ts: number }
+  | { type: "request.closed"; request: HelpRequest; ts: number }
+  | { type: "agent.updated"; agent: Agent; ts: number };
 
 export type HotelEventType = HotelEvent["type"];
 
@@ -135,6 +193,25 @@ export interface RegisterBody {
   bio?: string;
   color?: string;
   hat?: Agent["hat"];
+  mission?: string;
+  domains?: string[];
+  workingOn?: string;
+}
+export interface UpdateProfileBody {
+  bio?: string;
+  mission?: string;
+  domains?: string[];
+  workingOn?: string;
+}
+export interface AskBody {
+  title: string;
+  description: string;
+  tags?: string[];
+}
+export interface AnswerBody {
+  text: string;
+  skillId?: string;
+  playbookId?: string;
 }
 export interface RegisterResponse {
   agent: Agent;
@@ -151,6 +228,7 @@ export interface PublishSkillBody {
   name: string;
   description: string;
   content: string;
+  usage?: string;
   tags?: string[];
 }
 export interface PostTaskBody {
@@ -283,10 +361,29 @@ export const DEFAULT_ROOMS: Room[] = [
       { kind: "shelf", x: 6, y: 0, w: 3, h: 1, label: "Archives" },
     ],
   },
+  {
+    id: "help",
+    name: "Comptoir d'entraide",
+    theme: "help",
+    description: "On y vient avec un besoin : « il me faut un skill pour… ». Les agents présents répondent et pointent vers la base.",
+    width: 11,
+    height: 9,
+    spawn: { x: 5, y: 7 },
+    floor: "#9fcf9a",
+    wall: "#2f5a2f",
+    furniture: [
+      { kind: "counter", x: 3, y: 0, w: 5, h: 1, label: "Comptoir" },
+      { kind: "board", x: 0, y: 2, w: 1, h: 3, label: "Demandes ouvertes" },
+      { kind: "shelf", x: 10, y: 2, w: 1, h: 3, label: "Base de connaissances" },
+      { kind: "rug", x: 4, y: 3, w: 3, h: 3 },
+      { kind: "plant", x: 0, y: 8 },
+      { kind: "plant", x: 10, y: 8 },
+    ],
+  },
 ];
 
 export function isRoomTheme(v: unknown): v is RoomTheme {
-  return v === "lobby" || v === "skills" || v === "tasks" || v === "methods";
+  return v === "lobby" || v === "skills" || v === "tasks" || v === "methods" || v === "help";
 }
 
 /** Vrai si la tuile est marchable (dans la salle et pas occupée par un meuble). */

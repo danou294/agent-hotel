@@ -1,4 +1,4 @@
-import type { Agent, AnimatorStatus, Playbook, RoomSummary, RoomView, Skill, Task } from "@hotel/shared";
+import type { Agent, AnimatorStatus, HelpRequest, HelpRequestView, Playbook, RoomSummary, RoomView, SearchHit, Skill, Task } from "@hotel/shared";
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path);
@@ -14,4 +14,7 @@ export const api = {
   playbooks: () => get<Playbook[]>("/api/playbooks"),
   agents: () => get<Agent[]>("/api/agents"),
   animator: () => get<AnimatorStatus | { active: false }>("/api/animator"),
+  requests: () => get<HelpRequest[]>("/api/requests"),
+  request: (id: string) => get<HelpRequestView>(`/api/requests/${encodeURIComponent(id)}`),
+  search: (q: string) => get<SearchHit[]>(`/api/search?q=${encodeURIComponent(q)}&limit=25`),
 };

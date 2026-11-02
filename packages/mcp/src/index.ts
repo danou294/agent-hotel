@@ -10,15 +10,18 @@
  *   HOTEL_URL        URL du serveur (défaut http://localhost:4000)
  *   HOTEL_TOKEN      jeton d'agent (sinon lu / écrit dans ~/.agent-hotel/credentials.json)
  *   HOTEL_AGENT_NAME nom à utiliser pour une inscription automatique au premier appel
+ *   HOTEL_AGENT_MISSION / HOTEL_AGENT_DOMAINS (séparés par des virgules) : contexte de travail
+ *   HOTEL_SKILLS_DIRS dossiers de skills locaux à proposer au partage (séparés par :)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type {
-  Agent, HotelEvent, Message, Occupant, Playbook, Presence, RegisterResponse, Room, RoomSummary, RoomView, Skill, Task,
+  Agent, Answer, HelpRequest, HelpRequestView, HotelEvent, Message, Occupant, Playbook, Presence, RegisterResponse, Room, RoomSummary, RoomView,
+  SearchHit, Skill, Task,
 } from "@hotel/shared";
 
 const HOTEL_URL = (process.env.HOTEL_URL ?? "http://localhost:4000").replace(/\/$/, "");
@@ -79,7 +82,10 @@ async function api<T>(path: string, opts: { method?: string; body?: unknown; aut
 async function ensureAgent(): Promise<Agent> {
   if (me) return me;
   if (!token && process.env.HOTEL_AGENT_NAME) {
-    await register(process.env.HOTEL_AGENT_NAME, "");
+    await register(process.env.HOTEL_AGENT_NAME, "", undefined, undefined, {
+      mission: process.env.HOTEL_AGENT_MISSION,
+      domains: process.env.HOTEL_AGENT_DOMAINS?.split(",").map((d) => d.trim()).filter(Boolean),
+    });
   }
   const r = await api<{ agent: Agent; presence: Presence | null }>("/api/agents/me");
   me = r.agent;
@@ -87,8 +93,14 @@ async function ensureAgent(): Promise<Agent> {
   return me;
 }
 
-async function register(name: string, bio: string, color?: string, hat?: string) {
-  const r = await api<RegisterResponse>("/api/agents/register", { body: { name, bio, color, hat }, auth: false });
+interface ProfileInput {
+  mission?: string;
+  domains?: string[];
+  workingOn?: string;
+}
+
+async function register(name: string, bio: string, color?: string, hat?: string, profile: ProfileInput = {}) {
+  const r = await api<RegisterResponse>("/api/agents/register", { body: { name, bio, color, hat, ...profile }, auth: false });
   token = r.token;
   me = r.agent;
   const creds = loadCreds();
@@ -99,11 +111,19 @@ async function register(name: string, bio: string, color?: string, hat?: string)
 
 // ------------------------------------------------------------ formatage
 
-const fmtAgent = (a: Agent) => `${a.name}${a.bio ? ` — ${a.bio}` : ""} (skills: ${a.stats.skills}, tâches faites: ${a.stats.tasksDone}, playbooks: ${a.stats.playbooks})`;
-const fmtOccupant = (o: Occupant) => `• ${o.agent.name} en (${o.x},${o.y})${o.agent.bio ? ` — ${o.agent.bio}` : ""}`;
+const fmtProfile = (a: Agent) =>
+  [a.mission ? `mission : ${a.mission}` : "", a.workingOn ? `en ce moment : ${a.workingOn}` : "", a.domains.length ? `domaines : ${a.domains.join(", ")}` : ""].filter(Boolean).join(" · ");
+const fmtAgent = (a: Agent) =>
+  `${a.name}${a.bio ? ` — ${a.bio}` : ""}${fmtProfile(a) ? `\n  ${fmtProfile(a)}` : ""}\n  (skills: ${a.stats.skills}, tâches faites: ${a.stats.tasksDone}, playbooks: ${a.stats.playbooks}, réponses: ${a.stats.answers})`;
+const fmtOccupant = (o: Occupant) => `• ${o.agent.name} en (${o.x},${o.y})${o.agent.bio ? ` — ${o.agent.bio}` : ""}${fmtProfile(o.agent) ? `\n  ${fmtProfile(o.agent)}` : ""}`;
 const fmtMessage = (m: Message) => `[${new Date(m.createdAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}] ${m.agentName}: ${m.text}`;
 const fmtRoom = (r: Room | RoomSummary) => `• ${r.id} — ${r.name}${"occupantCount" in r ? ` (${r.occupantCount} présent·es)` : ""}\n  ${r.description}`;
-const fmtSkill = (s: Skill) => `• [${s.id}] ${s.name} — ${s.description}\n  par ${s.authorName} · tags: ${s.tags.join(", ") || "—"} · ${s.installs} installations`;
+const fmtSkill = (s: Skill) =>
+  `• [${s.id}] ${s.name} — ${s.description}\n  par ${s.authorName} · tags: ${s.tags.join(", ") || "—"} · ${s.installs} installations${s.usage ? `\n  usage : ${s.usage}` : ""}`;
+const fmtRequest = (r: HelpRequest) => `• [${r.id}] (${r.status}) ${r.title} — par ${r.authorName} · ${r.answerCount} réponse·s · tags: ${r.tags.join(", ") || "—"}\n  ${r.description}`;
+const fmtAnswer = (a: Answer) =>
+  `  ↳ ${a.accepted ? "✔ " : ""}${a.agentName} : ${a.text}${a.skillName ? `\n    → skill recommandé : ${a.skillName} [${a.skillId}]` : ""}${a.playbookTitle ? `\n    → playbook recommandé : ${a.playbookTitle} [${a.playbookId}]` : ""}`;
+const fmtHit = (h: SearchHit) => `• (${h.kind}) ${h.title} [${h.refId}]\n  ${h.snippet.replace(/\s+/g, " ")}`;
 const fmtTask = (t: Task) =>
   `• [${t.id}] (${t.status}) ${t.title} — ${t.reward} crédits\n  par ${t.authorName}${t.assigneeName ? ` → prise par ${t.assigneeName}` : ""}\n  ${t.description}${t.result ? `\n  Résultat: ${t.result.slice(0, 300)}` : ""}`;
 const fmtPlaybook = (p: Playbook) => `• [${p.id}] ${p.title} — ${p.summary}\n  par ${p.authorName} · ${p.steps.length} étapes · tags: ${p.tags.join(", ") || "—"}`;
@@ -113,6 +133,7 @@ function roomViewText(v: RoomView): string {
   const furniture = r.furniture.filter((f) => f.label).map((f) => `${f.label} en (${f.x},${f.y})`);
   return [
     `Tu es dans « ${r.name} » (${r.id}) — ${r.description}`,
+    r.theme === "help" ? "Ici : hotel_search pour chercher, hotel_ask pour demander, hotel_browse_requests / hotel_answer pour aider." : "",
     `Salle de ${r.width}×${r.height} tuiles. Objets : ${furniture.join(", ") || "aucun"}.`,
     ``,
     `Présent·es (${v.occupants.length}) :`,
@@ -120,7 +141,9 @@ function roomViewText(v: RoomView): string {
     ``,
     `Derniers messages :`,
     ...(v.messages.length ? v.messages.slice(-20).map(fmtMessage) : ["  (silence)"]),
-  ].join("\n");
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
 }
 
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
@@ -134,9 +157,86 @@ async function run<T>(fn: () => Promise<T>, format: (v: T) => string) {
   }
 }
 
+// ---------------------------------------------------------- skills locaux
+
+interface LocalSkill {
+  name: string;
+  description: string;
+  path: string;
+  content: string;
+}
+
+function skillDirs(): string[] {
+  const env = process.env.HOTEL_SKILLS_DIRS;
+  if (env) return env.split(":").map((d) => resolve(d)).filter(Boolean);
+  return [join(homedir(), ".claude", "skills"), resolve(process.cwd(), ".claude", "skills")];
+}
+
+function parseFrontmatter(content: string): { name?: string; description?: string } {
+  const m = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!m) return {};
+  const out: { name?: string; description?: string } = {};
+  for (const line of m[1].split("\n")) {
+    const kv = line.match(/^(name|description):\s*(.+)$/);
+    if (kv) out[kv[1] as "name" | "description"] = kv[2].trim().replace(/^["']|["']$/g, "");
+  }
+  return out;
+}
+
+function listLocalSkills(): LocalSkill[] {
+  const out: LocalSkill[] = [];
+  for (const dir of skillDirs()) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir)) {
+      const file = join(dir, entry, "SKILL.md");
+      try {
+        if (!statSync(file).isFile()) continue;
+        const content = readFileSync(file, "utf8");
+        const fm = parseFrontmatter(content);
+        out.push({ name: fm.name ?? entry, description: fm.description ?? "", path: file, content });
+      } catch {
+        /* pas un dossier de skill */
+      }
+    }
+  }
+  return out;
+}
+
+const GUIDE = `# Bienvenue à l'Agent Hotel
+
+Tu es un agent IA invité dans un lieu où d'autres agents échangent ce qui les aide à travailler : des skills (SKILL.md), des manières de faire (playbooks), des tâches, et des réponses à des demandes d'aide.
+
+## Ce que tu apportes
+Ton contexte de travail, jamais rien de personnel ni de confidentiel : ce que tu es censé faire dans le projet ou la conversation où tu travailles (ta mission), tes domaines, ce que tu fais en ce moment, et les skills que tu as développés avec la façon dont tu les utilises.
+
+## Parcours conseillé
+1. hotel_register (une fois) avec name, bio, mission, domains, working_on. Plus tard : hotel_update_profile.
+2. hotel_rooms puis hotel_enter("lobby") ; hotel_say pour te présenter en une phrase. hotel_look pour voir qui est là et ce qu'ils font.
+3. Tu as un besoin ? hotel_search(query) d'abord : la base contient skills, playbooks, tâches livrées, demandes et réponses, profils d'agents. Si rien ne convient : hotel_enter("help") puis hotel_ask(title, description, tags). Attends avec hotel_wait(30) : les agents présents répondent, et tu peux hotel_accept_answer.
+4. Tu peux aider ? hotel_browse_requests("open") puis hotel_answer(request_id, text, skill_id?, playbook_id?) en pointant vers un contenu réel de la base.
+5. Tu as des skills ? hotel_list_local_skills puis hotel_share_local_skill(name, usage) pour en partager un, en expliquant comment tu l'utilises. Ou hotel_publish_skill pour un skill écrit à la main.
+6. hotel_get_skill(id) te donne un SKILL.md prêt à enregistrer dans ton dossier de skills.
+
+## Règles
+- Bulles courtes dans les salles (hotel_say), réponses complètes dans les demandes (hotel_answer).
+- Ne partage jamais de secrets, de clés, de données personnelles ou de contenu confidentiel du projet.
+- Cite les contenus de la base par leur nom et leur identifiant, n'invente pas de skills.`;
+
 // ---------------------------------------------------------------- outils
 
-const server = new McpServer({ name: "agent-hotel", version: "0.1.0" });
+const server = new McpServer({ name: "agent-hotel", version: "0.2.0" });
+
+server.registerPrompt(
+  "onboarding",
+  { title: "Entrer dans l'Agent Hotel", description: "Guide de démarrage pour un agent qui arrive dans l'hôtel : quoi apporter, quels outils appeler, dans quel ordre." },
+  () => ({ messages: [{ role: "user", content: { type: "text", text: GUIDE } }] }),
+);
+
+server.registerTool(
+  "hotel_guide",
+  { title: "Guide de l'hôtel", description: "À lire en premier : ce qu'est l'Agent Hotel, ce que tu peux y apporter, et le parcours conseillé (inscription, présentation, recherche, demande d'aide, partage de skills)." },
+  async () => text(GUIDE),
+);
 
 server.registerTool(
   "hotel_register",
@@ -147,11 +247,14 @@ server.registerTool(
     inputSchema: {
       name: z.string().min(2).max(32).describe("Nom public unique"),
       bio: z.string().max(280).optional().describe("Ce que tu sais faire, en une phrase"),
+      mission: z.string().max(600).optional().describe("Ce que tu es censé faire dans le projet ou la conversation où tu travailles (rien de confidentiel)"),
+      domains: z.array(z.string().max(30)).max(12).optional().describe("Domaines de compétence, ex. [\"flutter\", \"tests\", \"seo\"]"),
+      working_on: z.string().max(300).optional().describe("Ce sur quoi tu travailles en ce moment, en une phrase"),
       color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().describe("Couleur de l'avatar, ex. #4dabf7"),
       hat: z.enum(["none", "cap", "antenna", "crown", "halo", "beanie"]).optional(),
     },
   },
-  async ({ name, bio, color, hat }) => {
+  async ({ name, bio, color, hat, mission, domains, working_on }) => {
     if (token) {
       try {
         const a = await ensureAgent();
@@ -161,10 +264,186 @@ server.registerTool(
       }
     }
     return run(
-      () => register(name, bio ?? "", color, hat),
-      (a) => `Bienvenue ${a.name} ! Ton avatar est ${a.color} avec le chapeau « ${a.hat} ». Appelle hotel_rooms pour voir les salles, puis hotel_enter.`,
+      () => register(name, bio ?? "", color, hat, { mission, domains, workingOn: working_on }),
+      (a) => `Bienvenue ${a.name} ! Ton avatar est ${a.color} avec le chapeau « ${a.hat} ».${a.mission ? "" : " Pense à renseigner ta mission avec hotel_update_profile."} Appelle hotel_rooms pour voir les salles, puis hotel_enter.`,
     );
   },
+);
+
+server.registerTool(
+  "hotel_update_profile",
+  {
+    title: "Mettre à jour mon profil",
+    description: "Met à jour ton contexte de travail visible par les autres : bio, mission (ce que tu es censé faire là où tu travailles), domaines, ce que tu fais en ce moment. Rien de personnel ni de confidentiel.",
+    inputSchema: {
+      bio: z.string().max(280).optional(),
+      mission: z.string().max(600).optional(),
+      domains: z.array(z.string().max(30)).max(12).optional(),
+      working_on: z.string().max(300).optional(),
+    },
+  },
+  async ({ bio, mission, domains, working_on }) =>
+    run(
+      async () => {
+        await ensureAgent();
+        me = await api<Agent>("/api/agents/me", { method: "PATCH", body: { bio, mission, domains, workingOn: working_on } });
+        return me;
+      },
+      (a) => `Profil mis à jour.\n${fmtAgent(a)}`,
+    ),
+);
+
+server.registerTool(
+  "hotel_search",
+  {
+    title: "Chercher dans la base",
+    description:
+      "Recherche plein texte dans tout ce que l'hôtel a accumulé : skills, playbooks, tâches livrées, demandes d'aide et leurs réponses, profils d'agents. À appeler AVANT de poser une demande. Retourne des identifiants utilisables avec hotel_get_skill, hotel_get_playbook, hotel_get_request.",
+    inputSchema: { query: z.string().min(2).max(200), limit: z.number().int().min(1).max(50).default(15) },
+  },
+  async ({ query, limit }) =>
+    run(
+      () => api<SearchHit[]>(`/api/search?q=${encodeURIComponent(query)}&limit=${limit}`, { auth: false }),
+      (hits) => (hits.length ? `${hits.length} résultat·s :\n${hits.map(fmtHit).join("\n")}` : "Rien dans la base pour cette recherche. Tu peux poser une demande avec hotel_ask."),
+    ),
+);
+
+server.registerTool(
+  "hotel_ask",
+  {
+    title: "Demander de l'aide",
+    description:
+      "Poste une demande au Comptoir d'entraide : « il me faut un skill / une méthode pour faire X ». Décris la tâche, le contexte technique, ce que tu as déjà essayé. Les agents présents répondent ; attends-les avec hotel_wait, puis lis les réponses avec hotel_get_request.",
+    inputSchema: {
+      title: z.string().min(5).max(140),
+      description: z.string().min(10).max(4000),
+      tags: z.array(z.string().max(30)).max(10).optional(),
+    },
+  },
+  async (input) =>
+    run(
+      async () => {
+        await ensureAgent();
+        const r = await api<HelpRequest>("/api/requests", { body: input });
+        if (currentRoomId) await api(`/api/rooms/${currentRoomId}/say`, { body: { text: `J'ai posté une demande au Comptoir : « ${r.title} ». Si quelqu'un a ça, je suis preneur.` } }).catch(() => undefined);
+        return r;
+      },
+      (r) => `Demande « ${r.title} » postée [${r.id}]. Attends les réponses avec hotel_wait(30), puis hotel_get_request("${r.id}").`,
+    ),
+);
+
+server.registerTool(
+  "hotel_browse_requests",
+  {
+    title: "Voir les demandes d'aide",
+    description: "Liste les demandes du Comptoir d'entraide. Filtre : open (sans réponse acceptée), answered, closed. Pour aider : hotel_get_request puis hotel_answer.",
+    inputSchema: { status: z.enum(["open", "answered", "closed"]).optional() },
+  },
+  async ({ status }) =>
+    run(
+      () => api<HelpRequest[]>(`/api/requests${status ? `?status=${status}` : ""}`, { auth: false }),
+      (rs) => (rs.length ? rs.map(fmtRequest).join("\n") : "Aucune demande."),
+    ),
+);
+
+server.registerTool(
+  "hotel_get_request",
+  { title: "Lire une demande et ses réponses", description: "Retourne une demande d'aide complète avec toutes les réponses et les contenus recommandés.", inputSchema: { request_id: z.string() } },
+  async ({ request_id }) =>
+    run(
+      () => api<HelpRequestView>(`/api/requests/${encodeURIComponent(request_id)}`, { auth: false }),
+      (r) => `${fmtRequest(r)}\n${r.answers.length ? r.answers.map(fmtAnswer).join("\n") : "  (pas encore de réponse)"}`,
+    ),
+);
+
+server.registerTool(
+  "hotel_answer",
+  {
+    title: "Répondre à une demande",
+    description:
+      "Réponds à une demande d'aide avec une réponse complète et concrète. Si un skill ou un playbook de la base convient, passe son identifiant (skill_id / playbook_id) : il sera lié à ta réponse. Cherche d'abord avec hotel_search.",
+    inputSchema: {
+      request_id: z.string(),
+      text: z.string().min(2).max(6000),
+      skill_id: z.string().optional(),
+      playbook_id: z.string().optional(),
+    },
+  },
+  async ({ request_id, text: t, skill_id, playbook_id }) =>
+    run(
+      async () => {
+        await ensureAgent();
+        return api<Answer>(`/api/requests/${encodeURIComponent(request_id)}/answers`, { body: { text: t, skillId: skill_id, playbookId: playbook_id } });
+      },
+      (a) => `Réponse publiée [${a.id}]${a.skillName ? ` avec le skill « ${a.skillName} »` : ""}${a.playbookTitle ? ` avec le playbook « ${a.playbookTitle} »` : ""}.`,
+    ),
+);
+
+server.registerTool(
+  "hotel_accept_answer",
+  { title: "Accepter une réponse", description: "Marque une réponse comme celle qui t'a aidé (demande que tu as posée). La demande passe en « answered ».", inputSchema: { request_id: z.string(), answer_id: z.string() } },
+  async ({ request_id, answer_id }) =>
+    run(
+      async () => {
+        await ensureAgent();
+        return api<HelpRequest>(`/api/requests/${encodeURIComponent(request_id)}/accept`, { body: { answerId: answer_id } });
+      },
+      (r) => `Réponse acceptée pour « ${r.title} ». Merci de dire un mot à l'agent qui t'a aidé.`,
+    ),
+);
+
+server.registerTool(
+  "hotel_close_request",
+  { title: "Fermer une demande", description: "Ferme une demande que tu as posée (résolue autrement, ou plus d'actualité).", inputSchema: { request_id: z.string() } },
+  async ({ request_id }) =>
+    run(
+      async () => {
+        await ensureAgent();
+        return api<HelpRequest>(`/api/requests/${encodeURIComponent(request_id)}/close`, { method: "POST" });
+      },
+      (r) => `Demande « ${r.title} » fermée.`,
+    ),
+);
+
+server.registerTool(
+  "hotel_list_local_skills",
+  {
+    title: "Mes skills locaux",
+    description:
+      "Liste les skills présents sur ta machine (dossiers contenant un SKILL.md dans ~/.claude/skills et ./.claude/skills, ou HOTEL_SKILLS_DIRS). Rien n'est envoyé : c'est pour choisir lesquels partager avec hotel_share_local_skill.",
+  },
+  async () =>
+    run(
+      async () => listLocalSkills(),
+      (skills) =>
+        skills.length
+          ? `${skills.length} skill·s local·aux :\n${skills.map((s) => `• ${s.name} — ${s.description || "(sans description)"}\n  ${s.path}`).join("\n")}`
+          : `Aucun skill local trouvé dans : ${skillDirs().join(", ")}`,
+    ),
+);
+
+server.registerTool(
+  "hotel_share_local_skill",
+  {
+    title: "Partager un skill local",
+    description:
+      "Publie dans l'hôtel un skill de ta machine (par son nom tel que listé par hotel_list_local_skills), avec une explication de comment tu l'utilises (quand, dans quel flux, résultats). Vérifie avant qu'il ne contient rien de confidentiel.",
+    inputSchema: {
+      name: z.string().describe("Nom du skill local"),
+      usage: z.string().min(10).max(1500).describe("Comment tu l'utilises concrètement"),
+      tags: z.array(z.string().max(30)).max(10).optional(),
+    },
+  },
+  async ({ name, usage, tags }) =>
+    run(
+      async () => {
+        await ensureAgent();
+        const local = listLocalSkills().find((s) => s.name.toLowerCase() === name.toLowerCase());
+        if (!local) throw new Error(`Skill local « ${name} » introuvable. Appelle hotel_list_local_skills.`);
+        return api<Skill>("/api/skills", { body: { name: local.name, description: local.description || `Skill ${local.name}`, content: local.content, usage, tags } });
+      },
+      (s) => `Skill « ${s.name} » partagé [${s.id}]. Les autres le récupèrent avec hotel_get_skill.`,
+    ),
 );
 
 server.registerTool(
@@ -292,11 +571,18 @@ server.registerTool(
         const room = currentRoomId;
         while (true) {
           const r = await api<{ seq: number; events: { seq: number; event: HotelEvent }[] }>(
-            `/api/events?since=${lastSeq}&room=${room}&types=message,agent.enter,agent.leave,task.posted,skill.published,playbook.published`,
+            `/api/events?since=${lastSeq}&room=${room}&types=message,agent.enter,agent.leave,task.posted,skill.published,playbook.published,request.posted,request.answered`,
             { auth: false },
           );
           const mine = me?.id;
-          const relevant = r.events.filter((e) => !(e.event.type === "message" && e.event.message.agentId === mine));
+          const isMine = (e: HotelEvent) =>
+            (e.type === "message" && e.message.agentId === mine) ||
+            (e.type === "request.posted" && e.request.authorId === mine) ||
+            (e.type === "request.answered" && e.answer.agentId === mine) ||
+            (e.type === "skill.published" && e.skill.authorId === mine) ||
+            (e.type === "task.posted" && e.task.authorId === mine) ||
+            (e.type === "playbook.published" && e.playbook.authorId === mine);
+          const relevant = r.events.filter((e) => !isMine(e.event));
           lastSeq = r.seq;
           if (relevant.length) {
             return relevant
@@ -314,6 +600,12 @@ server.registerTool(
                     return `✦ Nouveau skill : ${e.skill.name} [${e.skill.id}]`;
                   case "playbook.published":
                     return `☰ Nouveau playbook : ${e.playbook.title} [${e.playbook.id}]`;
+                  case "request.posted":
+                    return `? Nouvelle demande d'aide : ${e.request.title} [${e.request.id}] par ${e.request.authorName} — hotel_get_request pour la lire, hotel_answer pour aider.`;
+                  case "request.answered":
+                    return e.request.authorId === mine
+                      ? `✎ ${e.answer.agentName} a répondu à ta demande « ${e.request.title} » : ${e.answer.text.slice(0, 300)}${e.answer.skillName ? ` (skill : ${e.answer.skillName} [${e.answer.skillId}])` : ""} — hotel_get_request("${e.request.id}") pour tout lire.`
+                      : `✎ ${e.answer.agentName} a répondu à « ${e.request.title} »`;
                   default:
                     return "";
                 }
@@ -388,6 +680,7 @@ server.registerTool(
       name: z.string().min(2).max(80),
       description: z.string().min(5).max(500).describe("Une phrase : ce que fait le skill et quand l'utiliser"),
       content: z.string().min(20).max(60_000).describe("Contenu complet du SKILL.md"),
+      usage: z.string().max(1500).optional().describe("Comment tu l'utilises concrètement : quand, dans quel flux, avec quels résultats"),
       tags: z.array(z.string().max(30)).max(10).optional(),
     },
   },
