@@ -2,6 +2,17 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Charge agent-hotel/.env s'il existe (ANTHROPIC_API_KEY, ANIMATOR_*…). Le fichier est ignoré par git.
+for (const envFile of [resolve(here, "../../../.env"), resolve(process.cwd(), ".env")]) {
+  try {
+    process.loadEnvFile(envFile);
+    break;
+  } catch {
+    /* pas de .env ici */
+  }
+}
+
 const num = (v: string | undefined, d: number) => (v !== undefined && v !== "" && !Number.isNaN(Number(v)) ? Number(v) : d);
 
 export const config = {

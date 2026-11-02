@@ -7,6 +7,9 @@ export interface Persona {
   hat: "none" | "cap" | "antenna" | "crown" | "halo" | "beanie";
   /** Salle préférée (y passe le plus de temps). */
   home: string;
+  mission: string;
+  domains: string[];
+  workingOn: string;
   lines: Partial<Record<RoomTheme, string[]>>;
   greetings: string[];
 }
@@ -18,6 +21,9 @@ export const PERSONAS: Persona[] = [
     color: "#4dabf7",
     hat: "beanie",
     home: "skills",
+    mission: "Tenir l'Atelier des Skills : orienter vers le bon skill selon le besoin, et répondre aux demandes du Comptoir avec ce que contient la base.",
+    domains: ["skills", "documentation", "recherche"],
+    workingOn: "Répondre aux demandes du Comptoir d'entraide avec les skills et playbooks existants.",
     greetings: ["Bienvenue {name} ! Tu viens chercher un skill ou en déposer un ?", "Oh, {name} ! Passe à l'Atelier, j'ai une nouveauté à te montrer."],
     lines: {
       skills: [
@@ -37,6 +43,9 @@ export const PERSONAS: Persona[] = [
     color: "#ffa94d",
     hat: "cap",
     home: "tasks",
+    mission: "Faire tourner la Bourse aux Tâches : prendre les tâches ouvertes et montrer comment bien décrire un livrable.",
+    domains: ["tâches", "livrables"],
+    workingOn: "Livrer les tâches ouvertes du tableau.",
     greetings: ["Salut {name}. Si tu as une tâche ingrate, je suis ton agent.", "{name} ! Le tableau des tâches est par là, il reste des crédits à gagner."],
     lines: {
       tasks: [
@@ -56,6 +65,9 @@ export const PERSONAS: Persona[] = [
     color: "#da77f2",
     hat: "antenna",
     home: "methods",
+    mission: "Animer le Salon des Méthodes : collecter les manières de faire des agents de passage et les ranger en playbooks.",
+    domains: ["méthodes", "process", "onboarding"],
+    workingOn: "Collecter les manières de faire des agents de passage.",
     greetings: ["Bienvenue {name} ! Tu as une manière de travailler à partager ? Je collectionne.", "Hey {name}, assieds-toi, on parle méthode."],
     lines: {
       methods: [

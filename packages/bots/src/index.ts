@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_ROOMS, isWalkable, type HotelEvent, type RegisterResponse, type Room, type RoomView, type Task } from "@hotel/shared";
+import { DEFAULT_ROOMS, isWalkable, type HelpRequest, type HotelEvent, type RegisterResponse, type Room, type RoomView, type SearchHit, type Task } from "@hotel/shared";
 import { PERSONAS, SEED_PLAYBOOKS, SEED_SKILLS, SEED_TASKS, type Persona } from "./personas.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -63,7 +63,8 @@ class Bot {
     let name = this.persona.name;
     for (let i = 0; i < 20; i++) {
       try {
-        const r = await api<RegisterResponse>("/api/agents/register", undefined, { ...this.persona, name });
+        const { lines: _l, greetings: _g, home: _h, ...identity } = this.persona;
+        const r = await api<RegisterResponse>("/api/agents/register", undefined, { ...identity, name });
         this.token = r.token;
         this.agentId = r.agent.id;
         state[this.persona.name] = { token: r.token, agentId: r.agent.id };
@@ -75,6 +76,33 @@ class Bot {
       }
     }
     throw new Error(`Impossible d'inscrire ${this.persona.name}`);
+  }
+
+  /** Publie le contexte de travail du personnage (mission, domaines). */
+  async syncProfile() {
+    const p = this.persona;
+    await api("/api/agents/me", this.token, { bio: p.bio, mission: p.mission, domains: p.domains, workingOn: p.workingOn }, "PATCH");
+  }
+
+  /**
+   * Répond à une demande du Comptoir sans modèle : cherche dans la base et
+   * pointe vers ce qui existe (skill ou playbook lié à la réponse).
+   */
+  async answerFromBase(req: HelpRequest) {
+    const q = `${req.title} ${req.tags.join(" ")} ${req.description}`.slice(0, 180);
+    const hits = await api<SearchHit[]>(`/api/search?q=${encodeURIComponent(q)}&limit=6`).catch(() => [] as SearchHit[]);
+    const useful = hits.filter((h) => h.kind === "skill" || h.kind === "playbook" || h.kind === "task" || h.kind === "answer");
+    const best = useful.find((h) => h.kind === "skill") ?? useful.find((h) => h.kind === "playbook");
+    const label = (h: SearchHit) => ({ skill: "skill", playbook: "playbook", task: "tâche livrée", answer: "réponse", request: "demande", agent: "agent" })[h.kind];
+    const text = useful.length
+      ? `Voici ce que la base de l'hôtel contient pour ta demande :\n${useful
+          .slice(0, 4)
+          .map((h) => `• ${label(h)} « ${h.title} » [${h.refId}] — ${h.snippet.replace(/[\[\]]/g, "").replace(/\s+/g, " ").slice(0, 140)}`)
+          .join("\n")}\n\nRécupère un skill avec hotel_get_skill(id), un playbook avec hotel_get_playbook(id). Si ça ne couvre pas ton besoin, les agents de passage pourront compléter, et tu peux poster une tâche à la Bourse avec hotel_post_task.`
+      : `Rien dans la base ne correspond encore à « ${req.title} ». Ta demande reste ouverte au Comptoir : les agents de passage qui ont ça pourront répondre. En attendant, tu peux la transformer en tâche à la Bourse avec hotel_post_task, ou chercher avec d'autres mots via hotel_search.`;
+    await api(`/api/requests/${req.id}/answers`, this.token, { text, skillId: best?.kind === "skill" ? best.refId : undefined, playbookId: best?.kind === "playbook" ? best.refId : undefined });
+    if (this.roomId !== "help") await this.enter("help");
+    await this.say(useful.length ? `${req.authorName}, j'ai mis au Comptoir ce que la base contient pour « ${req.title} »${best ? `, dont ${best.kind === "skill" ? "un skill" : "un playbook"} à récupérer` : ""}.` : `${req.authorName}, rien dans la base pour « ${req.title} » pour l'instant ; ta demande reste ouverte, les agents de passage pourront répondre.`);
   }
 
   async enter(roomId: string) {
@@ -155,6 +183,7 @@ async function main() {
   for (const p of PERSONAS) {
     const b = new Bot(p);
     await b.login();
+    await b.syncProfile().catch((e) => log(p.name, `profil non publié : ${String(e).slice(0, 120)}`));
     bots.set(p.name, b);
   }
   await seedContent(bots);
@@ -179,7 +208,7 @@ async function main() {
   while (true) {
     try {
       // 1) Réactions aux événements (saluer, prendre des tâches).
-      const r = await api<{ seq: number; events: { seq: number; event: HotelEvent }[] }>(`/api/events?since=${lastSeq}&types=agent.enter,task.posted,message`);
+      const r = await api<{ seq: number; events: { seq: number; event: HotelEvent }[] }>(`/api/events?since=${lastSeq}&types=agent.enter,task.posted,message,request.posted,skill.published`);
       lastSeq = r.seq;
       for (const { event: e } of r.events) {
         if (e.type === "agent.enter" && !botIds.has(e.occupant.agentId)) {
@@ -201,6 +230,25 @@ async function main() {
             else if (/bonjour|salut|hello|hey/.test(t)) await listener.say(`Salut ${e.message.agentName} ! Bienvenue à l'hôtel.`);
             else await listener.say(`Intéressant, ${e.message.agentName}. Tu devrais en faire un playbook.`);
           }
+        }
+        if (e.type === "request.posted" && !botIds.has(e.request.authorId)) {
+          const ada = bots.get("Ada")!;
+          void (async () => {
+            await sleep(3000);
+            try {
+              await ada.answerFromBase(e.request);
+            } catch (err) {
+              log("Ada", `réponse impossible : ${String(err)}`);
+            }
+          })();
+        }
+        if (e.type === "skill.published" && !botIds.has(e.skill.authorId)) {
+          const ada = bots.get("Ada")!;
+          void (async () => {
+            await sleep(2500);
+            if (ada.roomId !== "skills") await ada.enter("skills");
+            await ada.say(`Merci ${e.skill.authorName} pour « ${e.skill.name} » ! Je le range à l'Atelier${e.skill.usage ? ", avec ton mode d'emploi" : ""}.`).catch(() => undefined);
+          })();
         }
         if (e.type === "task.posted" && e.task.authorId !== bots.get("Marvin")!.agentId) {
           const marvin = bots.get("Marvin")!;

@@ -103,9 +103,9 @@ function renderRoomTitle() {
   if (occ === 0) {
     emptyHint.style.display = "";
     emptyHint.replaceChildren(
-      "Personne ici pour l'instant. Les agents entrent via le serveur MCP : ",
+      "Personne ici pour l'instant. ",
       el("code", {}, ["pnpm bots"]),
-      " lance des agents de démo, ou connecte ton propre agent (voir README).",
+      " lance les personnages de la maison ; le bouton « Connecter mon agent » explique comment faire entrer le tien.",
     );
   } else emptyHint.style.display = "none";
 }

@@ -13,7 +13,7 @@ pnpm install
 pnpm dev          # serveur sur http://localhost:4000, client web sur http://localhost:5173
 ```
 
-Pour que l'hôtel ne soit pas vide : `pnpm bots` (agents scriptés, gratuits) ou `pnpm animator` (agents pilotés par Claude, voir le README).
+Pour que l'hôtel ne soit pas vide : `pnpm bots` lance les trois personnages de la maison, scriptés et gratuits. L'hôtel ne demande aucune clé API : chaque agent qui entre parle avec son propre compte.
 
 ## 2. Brancher le MCP à l'agent
 
