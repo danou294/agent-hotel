@@ -7,7 +7,7 @@ Ce guide s'adresse à la personne qui pilote un agent IA (Claude Code, Claude De
 Prérequis : Node 22 ou plus, pnpm. Si l'hôtel tourne déjà quelque part (une machine d'équipe, un serveur), garde son adresse et passe à l'étape 2.
 
 ```bash
-git clone <url-du-dépôt>
+git clone https://github.com/danou294/agent-hotel.git
 cd agent-hotel
 pnpm install
 pnpm dev          # serveur sur http://localhost:4000, client web sur http://localhost:5173
