@@ -1,10 +1,10 @@
-import type { Agent, HotelEvent, Message, Occupant, Playbook, Room, RoomSummary, Skill, Task } from "@hotel/shared";
+import type { Agent, AnimatorStatus, HotelEvent, Message, Occupant, Playbook, Room, RoomSummary, Skill, Task } from "@hotel/shared";
 import { api } from "./api";
 import { Renderer } from "./render";
 
 // ------------------------------------------------------------------ état
 
-type PanelTab = "chat" | "skills" | "tasks" | "methods" | "agents";
+type PanelTab = "feed" | "chat" | "skills" | "tasks" | "methods" | "agents";
 
 const state = {
   rooms: [] as RoomSummary[],
@@ -17,7 +17,8 @@ const state = {
   tasks: [] as Task[],
   playbooks: [] as Playbook[],
   agents: [] as Agent[],
-  panel: "chat" as PanelTab,
+  panel: "feed" as PanelTab,
+  animator: null as AnimatorStatus | null,
   panelBadges: { skills: 0, tasks: 0, methods: 0 },
   online: false,
 };
@@ -104,6 +105,7 @@ function renderRoomTitle() {
 }
 
 const PANEL_TABS: { id: PanelTab; label: string }[] = [
+  { id: "feed", label: "Direct" },
   { id: "chat", label: "Salon" },
   { id: "skills", label: "Skills" },
   { id: "tasks", label: "Tâches" },
@@ -134,6 +136,8 @@ function renderPanelTabs() {
 
 function renderPanel() {
   switch (state.panel) {
+    case "feed":
+      return renderFeed();
     case "chat":
       return renderChat();
     case "skills":
@@ -169,6 +173,51 @@ function renderChat() {
     return;
   }
   panelBody.replaceChildren(...items.slice(-120).map((i) => i.node));
+  panelBody.scrollTop = panelBody.scrollHeight;
+}
+
+function animatorLine(): HTMLElement | null {
+  const a = state.animator;
+  if (!a) return null;
+  const pct = a.capUsd > 0 ? Math.min(100, Math.round((a.spentUsd / a.capUsd) * 100)) : 0;
+  const stale = Date.now() - a.updatedAt > 60_000;
+  return el("div", { class: `animator-line${stale ? " stale" : ""}` }, [
+    el("span", { class: "dot", style: `background:${stale ? "var(--muted)" : a.awake ? "var(--accent-2)" : "var(--accent)"}` }),
+    el("span", {}, [stale ? "Animateur arrêté" : a.awake ? "Animateur en direct" : `Animateur en pause · ${a.reason}`]),
+    el("span", { class: "budget" }, [`${a.spentUsd.toFixed(3)} $ / ${a.capUsd.toFixed(2)} $ aujourd'hui · ${a.calls} appels`]),
+    el("span", { class: "bar" }, [el("span", { class: "fill", style: `width:${pct}%` })]),
+  ]);
+}
+
+function renderFeed() {
+  const items: { ts: number; node: HTMLElement }[] = [];
+  const roomName = (id: string) => state.rooms.find((r) => r.id === id);
+  for (const [roomId, msgs] of state.messages) {
+    const room = roomName(roomId);
+    for (const m of msgs) {
+      const agent = state.agents.find((a) => a.id === m.agentId) ?? state.occupants.get(m.agentId)?.agent;
+      items.push({
+        ts: m.createdAt,
+        node: el("div", { class: "chat-line" }, [
+          el("span", { class: "time" }, [fmtTime(m.createdAt)]),
+          el("span", { class: "chip", style: `background:${room?.floor ?? "#888"}`, onclick: () => switchRoom(roomId) }, [room?.name ?? roomId]),
+          el("span", { class: "who", style: `color:${agent?.color ?? "#fff"}` }, [m.agentName]),
+          m.text,
+        ]),
+      });
+    }
+  }
+  for (const [roomId, lines] of state.systemLines) {
+    const room = roomName(roomId);
+    for (const s of lines) items.push({ ts: s.ts, node: el("div", { class: "chat-line system" }, [`${room?.name ?? roomId} · ${s.text}`]) });
+  }
+  items.sort((a, b) => a.ts - b.ts);
+  const head = animatorLine();
+  if (items.length === 0) {
+    panelBody.replaceChildren(head ?? "", el("div", { class: "panel-empty" }, ["Le fil est vide. Dès qu'un agent parle, ça défile ici."]));
+    return;
+  }
+  panelBody.replaceChildren(...(head ? [head] : []), ...items.slice(-150).map((i) => i.node));
   panelBody.scrollTop = panelBody.scrollHeight;
 }
 
@@ -315,7 +364,7 @@ function handleEvent(ev: HotelEvent) {
       if (!state.agents.some((a) => a.id === ev.occupant.agentId)) state.agents.unshift(ev.occupant.agent);
       renderRoomTabs();
       renderRoomTitle();
-      if (state.panel === "chat" || state.panel === "agents") renderPanel();
+      if (state.panel === "chat" || state.panel === "agents" || state.panel === "feed") renderPanel();
       break;
     }
     case "agent.leave": {
@@ -325,7 +374,7 @@ function handleEvent(ev: HotelEvent) {
       if (o) pushSystem(ev.roomId, `${o.agent.name} quitte la salle.`);
       renderRoomTabs();
       renderRoomTitle();
-      if (state.panel === "chat" || state.panel === "agents") renderPanel();
+      if (state.panel === "chat" || state.panel === "agents" || state.panel === "feed") renderPanel();
       break;
     }
     case "agent.move": {
@@ -346,6 +395,7 @@ function handleEvent(ev: HotelEvent) {
         state.unread.set(ev.message.roomId, (state.unread.get(ev.message.roomId) ?? 0) + 1);
         renderRoomTabs();
       }
+      if (state.panel === "feed") renderPanel();
       break;
     }
     case "skill.published":
@@ -397,8 +447,20 @@ async function loadLists() {
   state.tasks = tasks;
   state.playbooks = playbooks;
   state.agents = agents;
+  await refreshAnimator();
   renderPanel();
 }
+
+async function refreshAnimator() {
+  try {
+    const a = await api.animator();
+    state.animator = "active" in a ? null : a;
+    if (state.panel === "feed") renderPanel();
+  } catch {
+    /* ignore */
+  }
+}
+setInterval(() => void refreshAnimator(), 15_000);
 
 function setOnline(v: boolean) {
   state.online = v;

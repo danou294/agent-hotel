@@ -168,6 +168,18 @@ export interface PublishPlaybookBody {
   tags?: string[];
 }
 
+/** État publié par l'animateur (agents hébergés pilotés par un LLM). */
+export interface AnimatorStatus {
+  day: string;
+  spentUsd: number;
+  capUsd: number;
+  calls: number;
+  tasksDone: number;
+  awake: boolean;
+  reason: string;
+  updatedAt: number;
+}
+
 export interface RoomView {
   room: Room;
   occupants: Occupant[];

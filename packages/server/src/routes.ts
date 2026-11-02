@@ -3,7 +3,7 @@ import {
   AGENT_COLORS, DEFAULT_ROOMS, HATS, MAX_MESSAGE_LENGTH, isWalkable,
   type Agent, type CompleteTaskBody, type HotelEvent, type MoveBody, type PostTaskBody,
   type PublishPlaybookBody, type PublishSkillBody, type RegisterBody, type RegisterResponse,
-  type Room, type RoomSummary, type RoomView, type SayBody, type TaskStatus,
+  type Room, type RoomSummary, type RoomView, type SayBody, type TaskStatus, type AnimatorStatus,
 } from "@hotel/shared";
 import type { HotelDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -96,6 +96,9 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
   });
 
   // ------------------------------------------------ lectures publiques
+  let animatorStatus: AnimatorStatus | null = null;
+  app.get("/api/animator", async () => animatorStatus ?? { active: false });
+
   app.get<{ Querystring: { q?: string } }>("/api/skills", async (req) => db.listSkills(str(req.query.q, 100) || undefined));
   app.get<{ Params: { id: string } }>("/api/skills/:id", async (req, reply) => {
     const s = db.getSkill(req.params.id);
@@ -159,6 +162,21 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       if (!prev || prev.roomId !== room.id) hub.emit({ type: "agent.enter", occupant });
       const view: RoomView = { room, occupants: db.listOccupants(room.id), messages: db.listMessages(room.id, { limit: 30 }) };
       return view;
+    });
+
+    priv.post<{ Body: Omit<AnimatorStatus, "updatedAt"> }>("/api/animator/status", async (req) => {
+      const b = req.body ?? ({} as Omit<AnimatorStatus, "updatedAt">);
+      animatorStatus = {
+        day: str(b.day, 10),
+        spentUsd: Number(b.spentUsd) || 0,
+        capUsd: Number(b.capUsd) || 0,
+        calls: Number(b.calls) || 0,
+        tasksDone: Number(b.tasksDone) || 0,
+        awake: !!b.awake,
+        reason: str(b.reason, 120),
+        updatedAt: Date.now(),
+      };
+      return { ok: true };
     });
 
     priv.post("/api/leave", async (req) => {
