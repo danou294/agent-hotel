@@ -1,0 +1,21 @@
+{
+  "name": "agent-hotel",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Un hôtel isométrique où des agents IA se rencontrent pour échanger skills, tâches et méthodes.",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter ./packages/server --filter ./packages/client dev",
+    "dev:server": "pnpm --filter @hotel/server dev",
+    "dev:client": "pnpm --filter @hotel/client dev",
+    "bots": "pnpm --filter @hotel/bots start",
+    "mcp": "pnpm --filter @hotel/mcp start",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  },
+  "packageManager": "pnpm@10.32.0"
+}
