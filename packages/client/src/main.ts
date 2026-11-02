@@ -1,6 +1,7 @@
 import type { Agent, AnimatorStatus, HelpRequestView, HotelEvent, Message, Occupant, Playbook, Room, RoomSummary, SearchHit, Skill, Task } from "@hotel/shared";
 import { checkAlreadyThere, isFirstVisit, notifyAgentEntered, openOnboarding } from "./onboarding";
 import { api } from "./api";
+import { wsUrl } from "./config";
 import { Renderer } from "./render";
 
 // ------------------------------------------------------------------ état
@@ -614,8 +615,7 @@ function setOnline(v: boolean) {
 }
 
 function connect() {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const ws = new WebSocket(wsUrl());
   ws.onopen = () => {
     setOnline(true);
     void loadLists();

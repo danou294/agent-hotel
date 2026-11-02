@@ -1,7 +1,9 @@
 import type { Agent, AnimatorStatus, HelpRequest, HelpRequestView, Playbook, RoomSummary, RoomView, SearchHit, Skill, Task } from "@hotel/shared";
 
+import { HOTEL_URL } from "./config";
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(path);
+  const res = await fetch(HOTEL_URL + path);
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return (await res.json()) as T;
 }

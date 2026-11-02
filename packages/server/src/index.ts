@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
+import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -24,6 +25,8 @@ const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? "info" }, disabl
 
 await app.register(cors, { origin: true });
 await app.register(websocket);
+// Limite de débit par adresse IP : protège l'API publique contre les boucles d'agents emballés.
+await app.register(rateLimit, { max: Number(process.env.RATE_LIMIT_PER_MINUTE ?? 240), timeWindow: "1 minute" });
 
 registerRoutes(app, db, hub);
 

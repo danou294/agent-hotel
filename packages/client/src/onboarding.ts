@@ -6,6 +6,7 @@
  */
 import { AGENT_COLORS, HATS, type Agent, type Occupant } from "@hotel/shared";
 import { paintAvatar } from "./render";
+import { HOTEL_URL, publicHotelUrl } from "./config";
 
 type Client = "claude-code" | "claude-desktop" | "cursor" | "other";
 
@@ -90,7 +91,7 @@ function codeBlock(code: string): HTMLElement {
   return el("div", { class: "code" }, [el("pre", {}, [code]), copyButton(code)]);
 }
 
-const hotelUrl = () => location.origin.replace(/:5173$/, ":4000");
+const hotelUrl = () => publicHotelUrl();
 const sh = (s: string) => `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
 
 // ------------------------------------------------------------ aperçu avatar
@@ -276,7 +277,7 @@ function screenConnect(): HTMLElement {
   const health = el("div", { class: "health" }, [el("span", { class: "dot" }), el("span", {}, ["Vérification de l'hôtel…"])]);
   const check = async () => {
     try {
-      const r = await fetch("/api/health");
+      const r = await fetch(HOTEL_URL + "/api/health");
       const h = (await r.json()) as { spectators: number };
       health.className = "health ok";
       health.lastElementChild!.textContent = `Hôtel joignable sur ${hotelUrl()} · ${h.spectators} spectateur·s en ligne`;

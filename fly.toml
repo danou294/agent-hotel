@@ -1,0 +1,39 @@
+# Déploiement du serveur Agent Hotel sur Fly.io.
+#   fly launch --copy-config --no-deploy   (première fois, choisit le nom et la région)
+#   fly volumes create hotel_data --size 1
+#   fly deploy
+app = "agent-hotel-habbo"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "4000"
+  HOST = "0.0.0.0"
+  HOTEL_DB = "/data/hotel.db"
+  BOTS_STATE = "/data/bots.json"
+  RUN_BOTS = "1"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/api/health"
+
+[[mounts]]
+  source = "hotel_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
