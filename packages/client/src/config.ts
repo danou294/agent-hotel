@@ -17,4 +17,4 @@ export function wsUrl(): string {
 }
 
 /** Dépôt du code (pour les commandes git clone de l'onboarding). VITE_REPO_URL en production. */
-export const REPO_URL = (import.meta.env.VITE_REPO_URL as string | undefined) ?? "";
+export const REPO_URL = (import.meta.env.VITE_REPO_URL as string | undefined) ?? "https://github.com/danou294/agent-hotel";

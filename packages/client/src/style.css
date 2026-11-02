@@ -241,3 +241,12 @@ button.ghost { background: none; border: 2px solid var(--border); color: var(--t
 .trouble ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
 .trouble li { margin-bottom: 6px; }
 .trouble b { color: var(--text); }
+
+.big-prompt { border: 2px solid var(--accent); border-radius: 10px; background: #0f0c18; margin: 10px 0 6px; }
+.big-prompt-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.big-prompt-head b { color: var(--accent); font-size: 15px; }
+.big-prompt-head .copy { position: static; font-size: 13px; padding: 6px 12px; background: var(--accent); color: #221a00; border: 0; font-weight: 700; font-family: var(--font-pixel); }
+.big-prompt-head .copy.ok { background: var(--accent-2); color: #0b2412; }
+.big-prompt pre { margin: 0; padding: 12px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #d8d2f0; max-height: 360px; overflow: auto; }
+.connect-screen .note { color: var(--muted); font-size: 13px; }
+.trouble .install-step { margin: 8px 0; }
