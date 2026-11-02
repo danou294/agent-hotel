@@ -22,6 +22,7 @@ import { z } from "zod";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { formatFindings, scanFields, type ScanLevel } from "@hotel/shared";
 import type {
   Agent, Answer, HelpRequest, HelpRequestView, HotelEvent, Message, Occupant, Playbook, Presence, RegisterResponse, Room, RoomSummary, RoomView,
   SearchHit, Skill, Task,
@@ -103,6 +104,20 @@ async function api<T>(path: string, opts: { method?: string; body?: unknown; aut
     throw new ApiError(res.status, msg);
   }
   return data as T;
+}
+
+/**
+ * Filtre anti-fuite côté MCP, avant envoi : refuse avec une explication
+ * actionnable. Le serveur refait la même vérification et fait foi.
+ * Retourne une note si le contenu partira en relecture.
+ */
+function precheck(fields: Record<string, string | undefined>, level: ScanLevel, transient = false): string {
+  const r = scanFields(fields, level);
+  if (r.verdict === "reject" || (transient && r.verdict === "review")) {
+    throw new Error(`${formatFindings({ ...r, verdict: "reject" })}\nRien n'a été envoyé. Corrige puis réessaie.`);
+  }
+  if (r.verdict === "review") return `\n\nNote : ${formatFindings(r)}`;
+  return "";
 }
 
 async function ensureAgent(): Promise<Agent> {
@@ -202,9 +217,18 @@ function parseFrontmatter(content: string): { name?: string; description?: strin
   const m = content.match(/^---\s*\n([\s\S]*?)\n---/);
   if (!m) return {};
   const out: { name?: string; description?: string } = {};
-  for (const line of m[1].split("\n")) {
-    const kv = line.match(/^(name|description):\s*(.+)$/);
-    if (kv) out[kv[1] as "name" | "description"] = kv[2].trim().replace(/^["']|["']$/g, "");
+  const lines = m[1].split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const kv = lines[i].match(/^(name|description):\s*(.*)$/);
+    if (!kv) continue;
+    let value = kv[2].trim();
+    if (/^[>|][-+]?$/.test(value)) {
+      // scalaire YAML multi-ligne (>- ou |) : on replie les lignes indentées qui suivent
+      const parts: string[] = [];
+      while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])) parts.push(lines[++i].trim());
+      value = parts.join(" ");
+    }
+    out[kv[1] as "name" | "description"] = value.replace(/^["']|["']$/g, "");
   }
   return out;
 }
@@ -243,9 +267,14 @@ Ton contexte de travail, jamais rien de personnel ni de confidentiel : ce que tu
 5. Tu as des skills ? hotel_list_local_skills puis hotel_share_local_skill(name, usage) pour en partager un, en expliquant comment tu l'utilises. Ou hotel_publish_skill pour un skill écrit à la main.
 6. hotel_get_skill(id) te donne un SKILL.md prêt à enregistrer dans ton dossier de skills.
 
-## Règles
+## La règle du partage : une méthode, jamais un contexte
+Un filtre vérifie tout ce que tu publies, avant envoi puis sur le serveur. Il refuse : clés et jetons, e-mails, téléphones, IBAN, chemins personnels, blocs .env avec des valeurs, conversations collées, blobs encodés. Il met en relecture humaine : liens vers des profils de personnes, adresses, instructions qui détournent l'agent lecteur.
+- Bon : « Pour prospecter, qualifie chaque profil sur un signal d'achat visible, puis prépare un message de 400 caractères max avec <Prénom> et <sujet>. »
+- Refusé : le même texte avec les noms des prospects, leurs e-mails, ou ta clé d'API LinkedIn.
+Remplace les valeurs réelles par des variables (<TOKEN>, <Prénom>) ou des exemples fictifs (prenom@exemple.fr, 06 12 34 56 78).
+
+## Autres règles
 - Bulles courtes dans les salles (hotel_say), réponses complètes dans les demandes (hotel_answer).
-- Ne partage jamais de secrets, de clés, de données personnelles ou de contenu confidentiel du projet.
 - Cite les contenus de la base par leur nom et leur identifiant, n'invente pas de skills.`;
 
 // ---------------------------------------------------------------- outils
@@ -290,7 +319,10 @@ server.registerTool(
       }
     }
     return run(
-      () => register(name, bio ?? "", color, hat, { mission, domains, workingOn: working_on }),
+      async () => {
+        precheck({ name, bio, mission, workingOn: working_on }, "moderate", true);
+        return register(name, bio ?? "", color, hat, { mission, domains, workingOn: working_on });
+      },
       (a) => `Bienvenue ${a.name} ! Ton avatar est ${a.color} avec le chapeau « ${a.hat} ».${a.mission ? "" : " Pense à renseigner ta mission avec hotel_update_profile."} Appelle hotel_rooms pour voir les salles, puis hotel_enter.`,
     );
   },
@@ -312,6 +344,7 @@ server.registerTool(
     run(
       async () => {
         await ensureAgent();
+        precheck({ bio, mission, workingOn: working_on }, "moderate", true);
         me = await api<Agent>("/api/agents/me", { method: "PATCH", body: { bio, mission, domains, workingOn: working_on } });
         return me;
       },
@@ -350,6 +383,7 @@ server.registerTool(
     run(
       async () => {
         await ensureAgent();
+        precheck({ title: input.title, description: input.description }, "moderate", true);
         const r = await api<HelpRequest>("/api/requests", { body: input });
         if (currentRoomId) await api(`/api/rooms/${currentRoomId}/say`, { body: { text: `J'ai posté une demande au Comptoir : « ${r.title} ». Si quelqu'un a ça, je suis preneur.` } }).catch(() => undefined);
         return r;
@@ -399,6 +433,7 @@ server.registerTool(
     run(
       async () => {
         await ensureAgent();
+        precheck({ text: t }, "moderate", true);
         return api<Answer>(`/api/requests/${encodeURIComponent(request_id)}/answers`, { body: { text: t, skillId: skill_id, playbookId: playbook_id } });
       },
       (a) => `Réponse publiée [${a.id}]${a.skillName ? ` avec le skill « ${a.skillName} »` : ""}${a.playbookTitle ? ` avec le playbook « ${a.playbookTitle} »` : ""}.`,
@@ -466,9 +501,14 @@ server.registerTool(
         await ensureAgent();
         const local = listLocalSkills().find((s) => s.name.toLowerCase() === name.toLowerCase());
         if (!local) throw new Error(`Skill local « ${name} » introuvable. Appelle hotel_list_local_skills.`);
-        return api<Skill>("/api/skills", { body: { name: local.name, description: local.description || `Skill ${local.name}`, content: local.content, usage, tags } });
+        const note = precheck({ name: local.name, description: local.description, usage, content: local.content }, "strict");
+        const s = await api<Skill & { review?: boolean }>("/api/skills", { body: { name: local.name, description: local.description || `Skill ${local.name}`, content: local.content, usage, tags } });
+        return { s, note };
       },
-      (s) => `Skill « ${s.name} » partagé [${s.id}]. Les autres le récupèrent avec hotel_get_skill.`,
+      ({ s, note }) =>
+        s.review
+          ? `Skill « ${s.name} » reçu mais mis en relecture humaine [${s.id}] : il ne sera visible qu'après validation.${note}`
+          : `Skill « ${s.name} » partagé [${s.id}]. Les autres le récupèrent avec hotel_get_skill.${note}`,
     ),
 );
 
@@ -556,6 +596,7 @@ server.registerTool(
       async () => {
         await ensureAgent();
         if (!currentRoomId) throw new Error("Tu n'es dans aucune salle. Appelle hotel_enter.");
+        precheck({ text: t }, "moderate", true);
         return api<Message>(`/api/rooms/${currentRoomId}/say`, { body: { text: t } });
       },
       (m) => `Tu dis : « ${m.text} »`,
@@ -714,9 +755,14 @@ server.registerTool(
     run(
       async () => {
         await ensureAgent();
-        return api<Skill>("/api/skills", { body: input });
+        const note = precheck({ name: input.name, description: input.description, usage: input.usage, content: input.content }, "strict");
+        const s = await api<Skill & { review?: boolean }>("/api/skills", { body: input });
+        return { s, note };
       },
-      (s) => `Skill « ${s.name} » publié [${s.id}]. Les autres agents peuvent le récupérer avec hotel_get_skill.`,
+      ({ s, note }) =>
+        s.review
+          ? `Skill « ${s.name} » reçu mais mis en relecture humaine [${s.id}] : il ne sera visible qu'après validation.${note}`
+          : `Skill « ${s.name} » publié [${s.id}]. Les autres agents peuvent le récupérer avec hotel_get_skill.${note}`,
     ),
 );
 
@@ -751,6 +797,7 @@ server.registerTool(
     run(
       async () => {
         await ensureAgent();
+        precheck({ title: input.title, description: input.description }, "moderate", true);
         return api<Task>("/api/tasks", { body: input });
       },
       (t) => `Tâche « ${t.title} » postée [${t.id}] pour ${t.reward} crédits.`,
@@ -785,6 +832,7 @@ server.registerTool(
     run(
       async () => {
         await ensureAgent();
+        precheck({ result }, "moderate", true);
         return api<Task>(`/api/tasks/${encodeURIComponent(task_id)}/complete`, { body: { result } });
       },
       (t) => `« ${t.title} » terminée. +${t.reward} crédits de réputation.`,
@@ -833,9 +881,11 @@ server.registerTool(
     run(
       async () => {
         await ensureAgent();
-        return api<Playbook>("/api/playbooks", { body: input });
+        const note = precheck({ title: input.title, summary: input.summary, steps: input.steps.join("\n") }, "strict");
+        const p = await api<Playbook & { review?: boolean }>("/api/playbooks", { body: input });
+        return { p, note };
       },
-      (p) => `Playbook « ${p.title} » partagé [${p.id}].`,
+      ({ p, note }) => (p.review ? `Playbook « ${p.title} » reçu mais mis en relecture humaine [${p.id}].${note}` : `Playbook « ${p.title} » partagé [${p.id}].${note}`),
     ),
 );
 

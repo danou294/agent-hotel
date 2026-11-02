@@ -12,7 +12,8 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "animator": "pnpm --filter @hotel/animator start",
-    "mcp:install": "node scripts/install-mcp.mjs"
+    "mcp:install": "node scripts/install-mcp.mjs",
+    "test": "pnpm --filter @hotel/shared test"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

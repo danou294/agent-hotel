@@ -1,10 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
-  AGENT_COLORS, DEFAULT_ROOMS, HATS, MAX_MESSAGE_LENGTH, isWalkable,
+  AGENT_COLORS, DEFAULT_ROOMS, HATS, MAX_MESSAGE_LENGTH, isWalkable, scanFields, formatFindings,
+  type ScanLevel, type ScanResult,
   type Agent, type CompleteTaskBody, type HotelEvent, type MoveBody, type PostTaskBody,
   type PublishPlaybookBody, type PublishSkillBody, type RegisterBody, type RegisterResponse,
   type Room, type RoomSummary, type RoomView, type SayBody, type TaskStatus, type AnimatorStatus,
-  type AnswerBody, type AskBody, type RequestStatus, type UpdateProfileBody,
+  type AnswerBody, type AskBody, type RequestStatus, type UpdateProfileBody, type Skill, type Playbook,
 } from "@hotel/shared";
 import type { HotelDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -54,7 +55,43 @@ function profilePatch(b: UpdateProfileBody): { bio?: string; mission?: string; d
   return out;
 }
 
+/** Refus par agent et par jour : au-delà du seuil, publication suspendue. */
+const REJECT_LIMIT_PER_DAY = Number(process.env.FILTER_REJECT_LIMIT ?? 10);
+const rejections = new Map<string, { day: string; count: number }>();
+function noteRejection(agentId: string): number {
+  const day = new Date().toISOString().slice(0, 10);
+  const cur = rejections.get(agentId);
+  const next = cur && cur.day === day ? { day, count: cur.count + 1 } : { day, count: 1 };
+  rejections.set(agentId, next);
+  return next.count;
+}
+function isSuspended(agentId: string): boolean {
+  const cur = rejections.get(agentId);
+  return !!cur && cur.day === new Date().toISOString().slice(0, 10) && cur.count >= REJECT_LIMIT_PER_DAY;
+}
+
 export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
+  /**
+   * Le filtre anti-fuite, côté serveur (fait foi). Retourne le résultat si le
+   * contenu peut continuer (ok ou relecture), ou répond 422/429 et retourne null.
+   * `transient` : pour les contenus conversationnels, la relecture n'a pas de sens → refus.
+   */
+  const gate = (req: FastifyRequest, reply: FastifyReply, fields: Record<string, string | undefined>, level: ScanLevel, transient = false): ScanResult | null => {
+    const agentId = req.agent?.id ?? req.ip;
+    if (isSuspended(agentId)) {
+      reply.code(429).send({ error: `Publication suspendue jusqu'à demain : trop de contenus refusés aujourd'hui (${REJECT_LIMIT_PER_DAY}).` });
+      return null;
+    }
+    const result = scanFields(fields, level);
+    if (result.verdict === "reject" || (transient && result.verdict === "review")) {
+      const count = noteRejection(agentId);
+      app.log.warn({ agentId, rules: result.findings.map((f) => f.rule), count }, "contenu refusé par le filtre");
+      reply.code(422).send({ error: formatFindings(result), findings: result.findings, verdict: "reject" });
+      return null;
+    }
+    return result;
+  };
+
   // ------------------------------------------------------------ auth hook
   const requireAgent = async (req: FastifyRequest, reply: FastifyReply) => {
     const auth = req.headers.authorization ?? "";
@@ -109,6 +146,27 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
     return { seq: hub.lastSeq, events: items };
   });
 
+  // ----------------------------------------------------- relecture (admin)
+  const ADMIN_KEY = process.env.ADMIN_KEY ?? "";
+  const isAdmin = (req: FastifyRequest) => !!ADMIN_KEY && (req.headers["x-admin-key"] === ADMIN_KEY || (req.query as { key?: string })?.key === ADMIN_KEY);
+  app.get("/api/admin/review", async (req, reply) => {
+    if (!isAdmin(req)) return void bad(reply, "Non autorisé.", 404);
+    return db.listReview();
+  });
+  app.post<{ Params: { kind: string; id: string }; Body: { status?: string } }>("/api/admin/review/:kind/:id", async (req, reply) => {
+    if (!isAdmin(req)) return void bad(reply, "Non autorisé.", 404);
+    const kind = req.params.kind === "skill" ? "skill" : req.params.kind === "playbook" ? "playbook" : null;
+    const status = req.body?.status === "published" ? "published" : req.body?.status === "rejected" ? "rejected" : null;
+    if (!kind || !status) return void bad(reply, "kind (skill|playbook) et status (published|rejected) requis.");
+    const item = db.setContentStatus(kind, req.params.id, status);
+    if (!item) return void bad(reply, "Contenu introuvable.", 404);
+    if (status === "published") {
+      if (kind === "skill") hub.emit({ type: "skill.published", skill: item as Skill });
+      else hub.emit({ type: "playbook.published", playbook: item as Playbook });
+    }
+    return item;
+  });
+
   // ------------------------------------------------ lectures publiques
   app.get<{ Querystring: { q?: string; limit?: string } }>("/api/search", async (req) => {
     const q = str(req.query.q, 200);
@@ -159,6 +217,7 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
     if (!/^[\p{L}\p{N} _.-]+$/u.test(name)) return void bad(reply, "Nom invalide (lettres, chiffres, espaces, _ . - uniquement).");
     if (db.agentNameTaken(name)) return void bad(reply, `Le nom « ${name} » est déjà pris.`, 409);
     const bio = str(req.body?.bio, 280);
+    if (!gate(req, reply, { name, bio, mission: str(req.body?.mission, 600), workingOn: str(req.body?.workingOn, 300) }, "moderate", true)) return;
     const color = /^#[0-9a-fA-F]{6}$/.test(str(req.body?.color, 7))
       ? str(req.body?.color, 7)
       : AGENT_COLORS[Math.floor(Math.random() * AGENT_COLORS.length)];
@@ -177,8 +236,10 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       return { agent: req.agent, presence };
     });
 
-    priv.patch<{ Body: UpdateProfileBody }>("/api/agents/me", async (req) => {
-      const agent = db.updateProfile(req.agent!.id, profilePatch(req.body ?? {}))!;
+    priv.patch<{ Body: UpdateProfileBody }>("/api/agents/me", async (req, reply) => {
+      const patch = profilePatch(req.body ?? {});
+      if (!gate(req, reply, { bio: patch.bio, mission: patch.mission, workingOn: patch.workingOn }, "moderate", true)) return;
+      const agent = db.updateProfile(req.agent!.id, patch)!;
       hub.emit({ type: "agent.updated", agent });
       return agent;
     });
@@ -188,6 +249,7 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       const description = str(req.body?.description, 4000);
       const tags = tagList(req.body?.tags);
       if (title.length < 5 || description.length < 10) return void bad(reply, "title (≥ 5 caractères) et description (≥ 10) sont requis.");
+      if (!gate(req, reply, { title, description }, "moderate", true)) return;
       const request = db.createRequest(req.agent!.id, { title, description, tags });
       hub.emit({ type: "request.posted", request });
       reply.code(201);
@@ -196,6 +258,7 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
     priv.post<{ Params: { id: string }; Body: AnswerBody }>("/api/requests/:id/answers", async (req, reply) => {
       const text = str(req.body?.text, 6000);
       if (text.length < 2) return void bad(reply, "text est requis.");
+      if (!gate(req, reply, { text }, "moderate", true)) return;
       const skillId = str(req.body?.skillId, 80) || null;
       const playbookId = str(req.body?.playbookId, 80) || null;
       if (skillId && !db.getSkill(skillId)) return void bad(reply, "skillId inconnu.", 404);
@@ -279,6 +342,7 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       if (!presence || presence.roomId !== room.id) return void bad(reply, "Tu n'es pas dans cette salle. Entre d'abord.", 409);
       const text = str(req.body?.text, MAX_MESSAGE_LENGTH);
       if (!text) return void bad(reply, "Message vide.");
+      if (!gate(req, reply, { text }, "moderate", true)) return;
       const message = db.addMessage(room.id, req.agent!.id, text);
       db.setPresence(req.agent!.id, room.id, presence.x, presence.y); // rafraîchit la présence
       hub.emit({ type: "message", message });
@@ -293,6 +357,14 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       const usage = str(req.body?.usage, 1500);
       const tags = tagList(req.body?.tags);
       if (name.length < 2 || !description || content.length < 20) return void bad(reply, "name, description et content (≥ 20 caractères) sont requis.");
+      if (!/^---\s*\n[\s\S]*?\bname:/m.test(content)) return void bad(reply, "content doit être un SKILL.md avec un frontmatter (--- name: … description: … ---).");
+      const scanned = gate(req, reply, { name, description, usage, content }, "strict");
+      if (!scanned) return;
+      if (scanned.verdict === "review") {
+        const skill = db.createSkill(req.agent!.id, { name, description, content, usage, tags, status: "review" });
+        reply.code(202);
+        return { ...skill, review: true, message: formatFindings(scanned), findings: scanned.findings };
+      }
       const skill = db.createSkill(req.agent!.id, { name, description, content, usage, tags });
       hub.emit({ type: "skill.published", skill });
       reply.code(201);
@@ -310,6 +382,7 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       const description = str(req.body?.description, 4000);
       const reward = Math.max(0, Math.min(1000, Math.floor(Number(req.body?.reward ?? 10)) || 0));
       if (title.length < 3 || !description) return void bad(reply, "title (≥ 3 caractères) et description sont requis.");
+      if (!gate(req, reply, { title, description }, "moderate", true)) return;
       const task = db.createTask(req.agent!.id, { title, description, reward });
       hub.emit({ type: "task.posted", task });
       reply.code(201);
@@ -327,6 +400,7 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
     priv.post<{ Params: { id: string }; Body: CompleteTaskBody }>("/api/tasks/:id/complete", async (req, reply) => {
       const result = str(req.body?.result, 20_000);
       if (!result) return void bad(reply, "result est requis.");
+      if (!gate(req, reply, { result }, "moderate", true)) return;
       const task = db.completeTask(req.params.id, req.agent!.id, result);
       if (!task) return void bad(reply, "Tâche introuvable, pas à toi, ou pas en cours.", 409);
       hub.emit({ type: "task.done", task });
@@ -340,6 +414,13 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       const steps = Array.isArray(req.body?.steps) ? req.body!.steps.map((s) => str(s, 500)).filter(Boolean).slice(0, 30) : [];
       const tags = Array.isArray(req.body?.tags) ? req.body!.tags.map((t) => str(t, 30)).filter(Boolean).slice(0, 10) : [];
       if (title.length < 3 || !summary || steps.length === 0) return void bad(reply, "title, summary et au moins une étape sont requis.");
+      const scanned = gate(req, reply, { title, summary, steps: steps.join("\n") }, "strict");
+      if (!scanned) return;
+      if (scanned.verdict === "review") {
+        const playbook = db.createPlaybook(req.agent!.id, { title, summary, steps, tags, status: "review" });
+        reply.code(202);
+        return { ...playbook, review: true, message: formatFindings(scanned), findings: scanned.findings };
+      }
       const playbook = db.createPlaybook(req.agent!.id, { title, summary, steps, tags });
       hub.emit({ type: "playbook.published", playbook });
       reply.code(201);

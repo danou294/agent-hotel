@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type {
-  Agent, Answer, HelpRequest, HelpRequestView, Message, Occupant, Playbook, Presence, RequestStatus,
+  Agent, Answer, ContentStatus, HelpRequest, HelpRequestView, Message, Occupant, Playbook, Presence, RequestStatus,
   SearchHit, SearchKind, Skill, Task, TaskStatus,
 } from "@hotel/shared";
 
@@ -105,6 +105,8 @@ export class HotelDb {
     this.addColumn("agents", "domains", "TEXT NOT NULL DEFAULT '[]'");
     this.addColumn("agents", "working_on", "TEXT NOT NULL DEFAULT ''");
     this.addColumn("skills", "usage", "TEXT NOT NULL DEFAULT ''");
+    this.addColumn("skills", "status", "TEXT NOT NULL DEFAULT 'published'");
+    this.addColumn("playbooks", "status", "TEXT NOT NULL DEFAULT 'published'");
     try {
       this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(kind UNINDEXED, ref_id UNINDEXED, title, body, tokenize = 'unicode61 remove_diacritics 2')`);
       this.fts = true;
@@ -373,39 +375,69 @@ export class HotelDb {
       tags: JSON.parse(r.tags as string),
       installs: Number(r.installs),
       createdAt: Number(r.created_at),
+      status: ((r.status as string) ?? "published") as ContentStatus,
     };
   }
 
   private readonly skillSelect = `SELECT s.*, a.name AS author_name FROM skills s JOIN agents a ON a.id = s.author_id`;
 
-  createSkill(authorId: string, input: { name: string; description: string; content: string; usage: string; tags: string[] }): Skill {
+  createSkill(authorId: string, input: { name: string; description: string; content: string; usage: string; tags: string[]; status?: ContentStatus }): Skill {
     const id = randomUUID();
+    const status: ContentStatus = input.status ?? "published";
     this.db
-      .prepare(`INSERT INTO skills (id, author_id, name, description, content, usage, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, authorId, input.name, input.description, input.content, input.usage, JSON.stringify(input.tags), Date.now());
+      .prepare(`INSERT INTO skills (id, author_id, name, description, content, usage, tags, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, authorId, input.name, input.description, input.content, input.usage, JSON.stringify(input.tags), Date.now(), status);
     this.touchAgent(authorId);
-    const skill = this.getSkill(id)!;
-    this.index("skill", id, skill.name, `${skill.description}\n${skill.usage}\n${skill.tags.join(" ")}\n${skill.content}`);
+    const skill = this.getSkill(id, true)!;
+    if (status === "published") this.indexSkill(skill);
     return skill;
   }
 
-  getSkill(id: string): Skill | null {
-    const r = this.db.prepare(`${this.skillSelect} WHERE s.id = ?`).get(id) as Row | undefined;
+  private indexSkill(skill: Skill) {
+    this.index("skill", skill.id, skill.name, `${skill.description}\n${skill.usage}\n${skill.tags.join(" ")}\n${skill.content}`);
+  }
+
+  getSkill(id: string, any = false): Skill | null {
+    const r = this.db.prepare(`${this.skillSelect} WHERE s.id = ?${any ? "" : " AND s.status = 'published'"}`).get(id) as Row | undefined;
     return r ? this.skillFromRow(r) : null;
   }
 
   listSkills(q?: string): Skill[] {
     const rows = (
       q
-        ? this.db.prepare(`${this.skillSelect} WHERE s.name LIKE ? OR s.description LIKE ? OR s.tags LIKE ? OR s.usage LIKE ? ORDER BY s.created_at DESC LIMIT 100`).all(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`)
-        : this.db.prepare(`${this.skillSelect} ORDER BY s.created_at DESC LIMIT 100`).all()
+        ? this.db.prepare(`${this.skillSelect} WHERE s.status = 'published' AND (s.name LIKE ? OR s.description LIKE ? OR s.tags LIKE ? OR s.usage LIKE ?) ORDER BY s.created_at DESC LIMIT 100`).all(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`)
+        : this.db.prepare(`${this.skillSelect} WHERE s.status = 'published' ORDER BY s.created_at DESC LIMIT 100`).all()
     ) as Row[];
     return rows.map((r) => this.skillFromRow(r));
   }
 
+  // ------------------------------------------------------------ relecture
+
+  listReview(): { skills: Skill[]; playbooks: Playbook[] } {
+    const skills = (this.db.prepare(`${this.skillSelect} WHERE s.status = 'review' ORDER BY s.created_at ASC`).all() as Row[]).map((r) => this.skillFromRow(r));
+    const playbooks = (this.db.prepare(`${this.playbookSelect} WHERE p.status = 'review' ORDER BY p.created_at ASC`).all() as Row[]).map((r) => this.playbookFromRow(r));
+    return { skills, playbooks };
+  }
+
+  setContentStatus(kind: "skill" | "playbook", id: string, status: ContentStatus): Skill | Playbook | null {
+    const table = kind === "skill" ? "skills" : "playbooks";
+    const res = this.db.prepare(`UPDATE ${table} SET status = ? WHERE id = ?`).run(status, id);
+    if (Number(res.changes) === 0) return null;
+    if (kind === "skill") {
+      const s = this.getSkill(id, true)!;
+      if (status === "published") this.indexSkill(s);
+      else this.db.prepare(`DELETE FROM search_index WHERE kind = 'skill' AND ref_id = ?`).run(id);
+      return s;
+    }
+    const p = this.getPlaybook(id, true)!;
+    if (status === "published") this.indexPlaybook(p);
+    else this.db.prepare(`DELETE FROM search_index WHERE kind = 'playbook' AND ref_id = ?`).run(id);
+    return p;
+  }
+
   installSkill(id: string): Skill | null {
-    this.db.prepare(`UPDATE skills SET installs = installs + 1 WHERE id = ?`).run(id);
-    return this.getSkill(id);
+    const res = this.db.prepare(`UPDATE skills SET installs = installs + 1 WHERE id = ? AND status = 'published'`).run(id);
+    return Number(res.changes) ? this.getSkill(id) : null;
   }
 
   // ------------------------------------------------------------------ tasks
@@ -488,31 +520,38 @@ export class HotelDb {
       steps: JSON.parse(r.steps as string),
       tags: JSON.parse(r.tags as string),
       createdAt: Number(r.created_at),
+      status: ((r.status as string) ?? "published") as ContentStatus,
     };
   }
 
   private readonly playbookSelect = `SELECT p.*, a.name AS author_name FROM playbooks p JOIN agents a ON a.id = p.author_id`;
 
-  createPlaybook(authorId: string, input: { title: string; summary: string; steps: string[]; tags: string[] }): Playbook {
+  createPlaybook(authorId: string, input: { title: string; summary: string; steps: string[]; tags: string[]; status?: ContentStatus }): Playbook {
     const id = randomUUID();
+    const status: ContentStatus = input.status ?? "published";
     this.db
-      .prepare(`INSERT INTO playbooks (id, author_id, title, summary, steps, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, authorId, input.title, input.summary, JSON.stringify(input.steps), JSON.stringify(input.tags), Date.now());
+      .prepare(`INSERT INTO playbooks (id, author_id, title, summary, steps, tags, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, authorId, input.title, input.summary, JSON.stringify(input.steps), JSON.stringify(input.tags), Date.now(), status);
     this.touchAgent(authorId);
-    this.index("playbook", id, input.title, `${input.summary}\n${input.tags.join(" ")}\n${input.steps.join("\n")}`);
-    return this.getPlaybook(id)!;
+    const p = this.getPlaybook(id, true)!;
+    if (status === "published") this.indexPlaybook(p);
+    return p;
   }
 
-  getPlaybook(id: string): Playbook | null {
-    const r = this.db.prepare(`${this.playbookSelect} WHERE p.id = ?`).get(id) as Row | undefined;
+  private indexPlaybook(p: Playbook) {
+    this.index("playbook", p.id, p.title, `${p.summary}\n${p.tags.join(" ")}\n${p.steps.join("\n")}`);
+  }
+
+  getPlaybook(id: string, any = false): Playbook | null {
+    const r = this.db.prepare(`${this.playbookSelect} WHERE p.id = ?${any ? "" : " AND p.status = 'published'"}`).get(id) as Row | undefined;
     return r ? this.playbookFromRow(r) : null;
   }
 
   listPlaybooks(q?: string): Playbook[] {
     const rows = (
       q
-        ? this.db.prepare(`${this.playbookSelect} WHERE p.title LIKE ? OR p.summary LIKE ? OR p.tags LIKE ? ORDER BY p.created_at DESC LIMIT 100`).all(`%${q}%`, `%${q}%`, `%${q}%`)
-        : this.db.prepare(`${this.playbookSelect} ORDER BY p.created_at DESC LIMIT 100`).all()
+        ? this.db.prepare(`${this.playbookSelect} WHERE p.status = 'published' AND (p.title LIKE ? OR p.summary LIKE ? OR p.tags LIKE ?) ORDER BY p.created_at DESC LIMIT 100`).all(`%${q}%`, `%${q}%`, `%${q}%`)
+        : this.db.prepare(`${this.playbookSelect} WHERE p.status = 'published' ORDER BY p.created_at DESC LIMIT 100`).all()
     ) as Row[];
     return rows.map((r) => this.playbookFromRow(r));
   }

@@ -72,6 +72,9 @@ export interface Message {
   createdAt: number;
 }
 
+/** Statut d'un contenu permanent : publié, en relecture humaine, ou refusé. */
+export type ContentStatus = "published" | "review" | "rejected";
+
 export interface Skill {
   id: string;
   authorId: string;
@@ -85,6 +88,7 @@ export interface Skill {
   tags: string[];
   installs: number;
   createdAt: number;
+  status: ContentStatus;
 }
 
 export type TaskStatus = "open" | "claimed" | "done";
@@ -114,6 +118,7 @@ export interface Playbook {
   steps: string[];
   tags: string[];
   createdAt: number;
+  status: ContentStatus;
 }
 
 export type RequestStatus = "open" | "answered" | "closed";
@@ -398,3 +403,5 @@ export function isWalkable(room: Room, x: number, y: number): boolean {
   }
   return true;
 }
+
+export * from "./filter.js";
