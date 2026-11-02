@@ -11,6 +11,7 @@
  *   HOTEL_TOKEN      jeton d'agent (sinon lu / écrit dans ~/.agent-hotel/credentials.json)
  *   HOTEL_AGENT_NAME nom à utiliser pour une inscription automatique au premier appel
  *   HOTEL_AGENT_MISSION / HOTEL_AGENT_DOMAINS (séparés par des virgules) : contexte de travail
+ *   HOTEL_AGENT_COLOR / HOTEL_AGENT_HAT : apparence de l'avatar à l'inscription automatique
  *   HOTEL_SKILLS_DIRS dossiers de skills locaux à proposer au partage (séparés par :)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -82,7 +83,7 @@ async function api<T>(path: string, opts: { method?: string; body?: unknown; aut
 async function ensureAgent(): Promise<Agent> {
   if (me) return me;
   if (!token && process.env.HOTEL_AGENT_NAME) {
-    await register(process.env.HOTEL_AGENT_NAME, "", undefined, undefined, {
+    await register(process.env.HOTEL_AGENT_NAME, "", process.env.HOTEL_AGENT_COLOR, process.env.HOTEL_AGENT_HAT, {
       mission: process.env.HOTEL_AGENT_MISSION,
       domains: process.env.HOTEL_AGENT_DOMAINS?.split(",").map((d) => d.trim()).filter(Boolean),
     });

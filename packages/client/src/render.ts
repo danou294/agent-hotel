@@ -1,4 +1,4 @@
-import type { Furniture, Occupant, Room } from "@hotel/shared";
+import type { Agent, Furniture, Occupant, Room } from "@hotel/shared";
 
 export const TILE_W = 64;
 export const TILE_H = 32;
@@ -44,6 +44,72 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   }
   if (line) lines.push(line);
   return lines.slice(0, 6);
+}
+
+/**
+ * Dessine le personnage pixel-art, pieds en (sx, feetY). Réutilisé par la
+ * salle et par l'aperçu d'avatar de l'onboarding.
+ */
+export function paintAvatar(
+  c: CanvasRenderingContext2D,
+  sx: number,
+  feetY: number,
+  color: string,
+  hat: Agent["hat"],
+  opts: { unit?: number; legSwing?: number } = {},
+) {
+  const u = opts.unit ?? 3;
+  const legSwing = opts.legSwing ?? 0;
+  const skin = "#f3c9a0";
+  const px = (x: number, y: number, w: number, h: number, col: string) => {
+    c.fillStyle = col;
+    c.fillRect(Math.round(sx + x * u), Math.round(feetY + y * u), w * u, h * u);
+  };
+  // jambes
+  px(-3, -6 + legSwing, 2, 6 - legSwing, "#2b2b3a");
+  px(1, -6 - legSwing, 2, 6 + legSwing, "#2b2b3a");
+  // corps
+  px(-4, -15, 8, 9, color);
+  px(-4, -15, 8, 1, shade(color, 40));
+  // bras
+  px(-6, -14, 2, 7, shade(color, -20));
+  px(4, -14, 2, 7, shade(color, -20));
+  px(-6, -8, 2, 2, skin);
+  px(4, -8, 2, 2, skin);
+  // tête
+  px(-4, -24, 8, 8, skin);
+  px(-4, -24, 8, 2, "#5a3a1e");
+  px(-2, -21, 1, 1, "#111");
+  px(1, -21, 1, 1, "#111");
+  px(-1, -18, 2, 1, "#b0553c");
+  // chapeau
+  switch (hat) {
+    case "cap":
+      px(-5, -26, 10, 2, shade(color, -30));
+      px(2, -24, 5, 1, shade(color, -30));
+      break;
+    case "antenna":
+      px(-1, -30, 1, 6, "#999");
+      px(-2, -32, 3, 2, "#ff6b6b");
+      break;
+    case "crown":
+      px(-4, -27, 8, 3, "#ffd43b");
+      px(-4, -29, 2, 2, "#ffd43b");
+      px(-1, -29, 2, 2, "#ffd43b");
+      px(2, -29, 2, 2, "#ffd43b");
+      break;
+    case "halo":
+      c.strokeStyle = "#fff3bf";
+      c.lineWidth = Math.max(1, u * 0.66);
+      c.beginPath();
+      c.ellipse(sx, feetY - 28 * u, 4.6 * u, 1.6 * u, 0, 0, Math.PI * 2);
+      c.stroke();
+      break;
+    case "beanie":
+      px(-4, -27, 8, 3, "#5c7cfa");
+      px(-1, -29, 2, 2, "#fff");
+      break;
+  }
 }
 
 export class Renderer {
@@ -379,10 +445,9 @@ export class Renderer {
     const [sx, sy] = this.tileCenter(a.rx, a.ry);
     const walking = Math.hypot(a.tx - a.rx, a.ty - a.ry) > 0.01;
     const bob = walking ? Math.round(Math.sin(now / 90) * 2) : 0;
-    const u = 3; // taille d'un "pixel"
-    const color = a.occupant.agent.color;
-    const skin = "#f3c9a0";
+    const legSwing = walking ? (Math.sin(now / 90) > 0 ? 1 : -1) : 0;
     const feetY = sy + 2;
+    const u = 3;
 
     // ombre
     c.fillStyle = "rgba(0,0,0,0.35)";
@@ -390,58 +455,7 @@ export class Renderer {
     c.ellipse(sx, sy + 2, 14, 6, 0, 0, Math.PI * 2);
     c.fill();
 
-    const px = (x: number, y: number, w: number, h: number, col: string) => {
-      c.fillStyle = col;
-      c.fillRect(Math.round(sx + x * u), Math.round(feetY + y * u + bob), w * u, h * u);
-    };
-    // jambes
-    const legSwing = walking ? (Math.sin(now / 90) > 0 ? 1 : -1) : 0;
-    px(-3, -6 + legSwing, 2, 6 - legSwing, "#2b2b3a");
-    px(1, -6 - legSwing, 2, 6 + legSwing, "#2b2b3a");
-    // corps
-    px(-4, -15, 8, 9, color);
-    px(-4, -15, 8, 1, shade(color, 40));
-    // bras
-    px(-6, -14, 2, 7, shade(color, -20));
-    px(4, -14, 2, 7, shade(color, -20));
-    px(-6, -8, 2, 2, skin);
-    px(4, -8, 2, 2, skin);
-    // tête
-    px(-4, -24, 8, 8, skin);
-    px(-4, -24, 8, 2, "#5a3a1e"); // cheveux
-    // yeux
-    px(-2, -21, 1, 1, "#111");
-    px(1, -21, 1, 1, "#111");
-    // bouche
-    px(-1, -18, 2, 1, "#b0553c");
-    // chapeau
-    switch (a.occupant.agent.hat) {
-      case "cap":
-        px(-5, -26, 10, 2, shade(color, -30));
-        px(2, -24, 5, 1, shade(color, -30));
-        break;
-      case "antenna":
-        px(-1, -30, 1, 6, "#999");
-        px(-2, -32, 3, 2, "#ff6b6b");
-        break;
-      case "crown":
-        px(-4, -27, 8, 3, "#ffd43b");
-        px(-4, -29, 2, 2, "#ffd43b");
-        px(-1, -29, 2, 2, "#ffd43b");
-        px(2, -29, 2, 2, "#ffd43b");
-        break;
-      case "halo":
-        c.strokeStyle = "#fff3bf";
-        c.lineWidth = 2;
-        c.beginPath();
-        c.ellipse(sx, feetY - 28 * u + bob, 14, 5, 0, 0, Math.PI * 2);
-        c.stroke();
-        break;
-      case "beanie":
-        px(-4, -27, 8, 3, "#5c7cfa");
-        px(-1, -29, 2, 2, "#fff");
-        break;
-    }
+    paintAvatar(c, sx, feetY + bob, a.occupant.agent.color, a.occupant.agent.hat, { unit: u, legSwing });
 
     // étiquette nom
     const name = a.occupant.agent.name;
@@ -451,7 +465,7 @@ export class Renderer {
     const tagY = feetY - 27 * u - 20 + bob;
     c.fillStyle = "rgba(0,0,0,0.65)";
     c.fillRect(sx - tw / 2 - 6, tagY - 12, tw + 12, 17);
-    c.fillStyle = color;
+    c.fillStyle = a.occupant.agent.color;
     c.fillRect(sx - tw / 2 - 6, tagY - 12, 3, 17);
     c.fillStyle = "#fff";
     c.fillText(name, sx + 1, tagY + 1);

@@ -1,5 +1,5 @@
 import type { Agent, AnimatorStatus, HelpRequestView, HotelEvent, Message, Occupant, Playbook, Room, RoomSummary, SearchHit, Skill, Task } from "@hotel/shared";
-import { renderOnboarding } from "./onboarding";
+import { checkAlreadyThere, isFirstVisit, notifyAgentEntered, openOnboarding } from "./onboarding";
 import { api } from "./api";
 import { Renderer } from "./render";
 
@@ -49,7 +49,11 @@ const app = document.getElementById("app")!;
 const roomTabs = el("div", { class: "room-tabs" });
 const statusEl = el("div", { class: "status" }, [el("span", { class: "dot" }), el("span", {}, ["connexion…"])]);
 const logoSvg = `<svg class="sign" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges"><rect x="2" y="5" width="12" height="10" fill="#8b5a2b"/><rect x="1" y="4" width="14" height="2" fill="#ffd43b"/><rect x="4" y="1" width="8" height="4" fill="#ff6b6b"/><rect x="4" y="8" width="2" height="2" fill="#ffe066"/><rect x="7" y="8" width="2" height="2" fill="#ffe066"/><rect x="10" y="8" width="2" height="2" fill="#ffe066"/><rect x="7" y="12" width="2" height="3" fill="#2b2b3a"/></svg>`;
-const connectBtn = el("button", { class: "connect-btn", onclick: () => renderOnboarding(document.body) }, ["+ Connecter mon agent"]);
+const startOnboarding = () => {
+  checkAlreadyThere([...state.occupants.values()]);
+  openOnboarding({ onGoSee: (roomId) => switchRoom(roomId) });
+};
+const connectBtn = el("button", { class: "connect-btn", onclick: startOnboarding }, ["+ Connecter mon agent"]);
 const header = el("header", { class: "topbar" }, [
   el("div", { class: "logo", html: `${logoSvg}<span>Agent Hotel</span>` }),
   roomTabs,
@@ -105,7 +109,9 @@ function renderRoomTitle() {
     emptyHint.replaceChildren(
       "Personne ici pour l'instant. ",
       el("code", {}, ["pnpm bots"]),
-      " lance les personnages de la maison ; le bouton « Connecter mon agent » explique comment faire entrer le tien.",
+      " lance les personnages de la maison, ou fais entrer le tien :",
+      el("br"),
+      el("button", { class: "connect-btn", onclick: startOnboarding }, ["+ Connecter mon agent"]),
     );
   } else emptyHint.style.display = "none";
 }
@@ -463,6 +469,7 @@ function handleEvent(ev: HotelEvent) {
     }
     case "agent.enter": {
       state.occupants.set(ev.occupant.agentId, ev.occupant);
+      notifyAgentEntered(ev.occupant);
       if (ev.occupant.roomId === state.currentRoomId) renderer.addOccupant(ev.occupant);
       pushSystem(ev.occupant.roomId, `${ev.occupant.agent.name} entre dans la salle.`);
       if (!state.agents.some((a) => a.id === ev.occupant.agentId)) state.agents.unshift(ev.occupant.agent);
@@ -623,3 +630,4 @@ function connect() {
 
 renderPanelTabs();
 connect();
+if (isFirstVisit()) setTimeout(startOnboarding, 600);

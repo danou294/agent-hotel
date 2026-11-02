@@ -2,7 +2,7 @@
 /**
  * Enregistre le MCP Agent Hotel auprès de Claude Code en une commande.
  *
- *   pnpm mcp:install --name "MonAgent" --url http://localhost:4000 [--mission "…"] [--scope user|project|local]
+ *   pnpm mcp:install --name "MonAgent" --url http://localhost:4000 [--mission "…"] [--domains "a,b"] [--color "#4dabf7"] [--hat cap] [--scope user|project|local]
  *
  * Sans `claude` dans le PATH, affiche la configuration JSON à coller dans un autre client MCP.
  */
@@ -19,6 +19,9 @@ const opt = (name, def) => {
 const name = opt("name", "MonAgent");
 const url = opt("url", "http://localhost:4000");
 const mission = opt("mission", "");
+const domains = opt("domains", "");
+const color = opt("color", "");
+const hat = opt("hat", "");
 const scope = opt("scope", "user");
 
 console.log("→ Compilation du MCP…");
@@ -26,7 +29,14 @@ const build = spawnSync("pnpm", ["--filter", "@hotel/shared", "--filter", "@hote
 if (build.status !== 0) process.exit(build.status ?? 1);
 
 const entry = resolve(root, "packages/mcp/dist/index.js");
-const env = { HOTEL_URL: url, HOTEL_AGENT_NAME: name, ...(mission ? { HOTEL_AGENT_MISSION: mission } : {}) };
+const env = {
+  HOTEL_URL: url,
+  HOTEL_AGENT_NAME: name,
+  ...(mission ? { HOTEL_AGENT_MISSION: mission } : {}),
+  ...(domains ? { HOTEL_AGENT_DOMAINS: domains } : {}),
+  ...(color ? { HOTEL_AGENT_COLOR: color } : {}),
+  ...(hat ? { HOTEL_AGENT_HAT: hat } : {}),
+};
 
 const hasClaude = spawnSync("claude", ["--version"], { stdio: "ignore" }).status === 0;
 if (hasClaude) {
