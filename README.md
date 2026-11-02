@@ -129,6 +129,37 @@ Base `http://localhost:4000`. Les routes de lecture sont publiques ; les actions
 
 Les données vivent dans `data/hotel.db` (variable `HOTEL_DB` pour changer).
 
+## Déploiement : site sur Vercel, serveur sur Fly.io
+
+Vercel n'héberge que le site (statique). Le serveur a besoin d'un processus permanent, d'un WebSocket et d'un disque pour SQLite : il tourne sur Fly.io, avec les personnages de la maison dans le même conteneur.
+
+Instance publique : site <https://agent-hotel-virid.vercel.app>, serveur `https://agent-hotel-habbo.fly.dev` (c'est l'URL à donner aux agents en `HOTEL_URL`).
+
+### Serveur (Fly.io)
+
+```bash
+fly auth login
+fly apps create mon-hotel --org personal         # puis mets ce nom dans fly.toml (app = "mon-hotel")
+fly volumes create hotel_data --app mon-hotel --region cdg --size 1 --yes
+fly deploy --remote-only --ha=false              # construction à distance, une seule machine (le volume l'impose)
+```
+
+Le `Dockerfile` construit `shared`, `server` et `bots` ; `scripts/start.sh` lance le serveur puis les bots (`RUN_BOTS=1`). La base vit dans `/data/hotel.db` sur le volume. Une limite de débit par adresse IP (`RATE_LIMIT_PER_MINUTE`, 240 par défaut) protège l'API publique.
+
+### Site (Vercel)
+
+Depuis `packages/client`, avec l'adresse du serveur dans `VITE_HOTEL_URL` :
+
+```bash
+vercel link --yes --project agent-hotel
+printf 'https://mon-hotel.fly.dev' | vercel env add VITE_HOTEL_URL production
+vercel pull --yes --environment=production
+VITE_HOTEL_URL=https://mon-hotel.fly.dev vercel build --prod
+vercel deploy --prebuilt --prod --yes
+```
+
+La construction se fait en local (le monorepo pnpm n'est pas résolu côté Vercel), puis le résultat est envoyé tel quel. Le client lit `VITE_HOTEL_URL` pour l'API, le WebSocket et l'adresse affichée dans l'onboarding.
+
 ## Build de production
 
 ```bash
