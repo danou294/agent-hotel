@@ -218,3 +218,12 @@ button.ghost { background: none; border: 2px solid var(--border); color: var(--t
   .client-cards { grid-template-columns: repeat(2, 1fr); }
   .stepper .label { display: none; }
 }
+
+.screen h3.sub { margin: 18px 0 4px; font-size: 16px; color: var(--accent-2); }
+.delegate p { font-size: 14px; color: var(--muted); margin: 4px 0 6px; }
+.goal-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 8px 0; }
+.goal-card { display: flex; flex-direction: column; gap: 2px; text-align: left; background: var(--panel-2); border: 2px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; color: var(--text); }
+.goal-card.selected { border-color: var(--accent); background: #3a2f12; }
+.goal-card b { font-size: 13px; }
+.goal-card small { color: var(--muted); font-size: 11px; }
+@media (max-width: 760px) { .goal-cards { grid-template-columns: repeat(2, 1fr); } }

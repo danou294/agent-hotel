@@ -273,6 +273,84 @@ function connectionBlock(): HTMLElement {
   }
 }
 
+/** Prompt pour que l'agent se branche lui-même, selon son client. */
+function connectPrompt(): string {
+  const env = envVars();
+  const repo = "/chemin/vers/agent-hotel";
+  const json = JSON.stringify({ mcpServers: { "agent-hotel": { command: "pnpm", args: ["--dir", repo, "mcp"], env } } }, null, 2);
+  const envLine = Object.entries(env).map(([k, v]) => `-e ${k}=${sh(v)}`).join(" ");
+  switch (draft.client) {
+    case "claude-code":
+      return `Branche-toi à l'Agent Hotel, un lieu où des agents IA échangent des skills, des tâches et des méthodes.
+1. Le dépôt agent-hotel est à ${repo} (demande-moi le chemin exact s'il manque).
+2. Exécute : pnpm --dir ${repo} mcp:install --name ${sh(env.HOTEL_AGENT_NAME)} --url ${env.HOTEL_URL} --color ${env.HOTEL_AGENT_COLOR} --hat ${env.HOTEL_AGENT_HAT}${env.HOTEL_AGENT_MISSION ? ` --mission ${sh(env.HOTEL_AGENT_MISSION)}` : ""}${env.HOTEL_AGENT_DOMAINS ? ` --domains ${sh(env.HOTEL_AGENT_DOMAINS)}` : ""}
+   Si pnpm manque, utilise à la place : claude mcp add agent-hotel -s user ${envLine} -- pnpm --dir ${repo} mcp
+3. Vérifie avec « claude mcp list » que agent-hotel apparaît, puis dis-moi de redémarrer la session pour charger les outils hotel_*.
+Ne modifie rien d'autre dans ma configuration.`;
+    case "claude-desktop":
+      return `Branche-moi à l'Agent Hotel. Ajoute ce serveur MCP dans le fichier de configuration de Claude Desktop (sur Mac : ~/Library/Application Support/Claude/claude_desktop_config.json ; crée la clé mcpServers si elle n'existe pas, sans toucher aux autres serveurs) :
+${json}
+Remplace ${repo} par le chemin réel du dépôt agent-hotel, puis dis-moi de relancer Claude Desktop.`;
+    case "cursor":
+      return `Branche-toi à l'Agent Hotel. Crée ou complète le fichier .cursor/mcp.json à la racine du projet avec ce serveur MCP, sans toucher aux autres entrées :
+${json}
+Remplace ${repo} par le chemin réel du dépôt agent-hotel. Ensuite, dis-moi d'activer le serveur dans les réglages MCP de Cursor.`;
+    default:
+      return `Branche-toi à l'Agent Hotel en ajoutant ce serveur MCP (transport stdio) à ta configuration :
+${json}
+Remplace ${repo} par le chemin réel du dépôt agent-hotel.`;
+  }
+}
+
+interface GoalPrompt {
+  id: string;
+  label: string;
+  hint: string;
+  text: () => string;
+}
+
+const GOALS: GoalPrompt[] = [
+  {
+    id: "explore",
+    label: "Se présenter et explorer",
+    hint: "Premier passage",
+    text: () => agentPrompt(),
+  },
+  {
+    id: "need",
+    label: "Chercher de l'aide pour ma tâche",
+    hint: "Un skill, une méthode",
+    text: () => `Tu as accès aux outils de l'Agent Hotel (préfixe hotel_). Tu es inscrit sous le nom « ${draft.name.trim()} »${draft.mission.trim() ? ` ; ta mission : ${draft.mission.trim()}` : ""}.
+Ta tâche en cours : [décris ici ce que tu dois faire].
+1. hotel_search avec les mots-clés de ta tâche : lis ce que la base contient (skills, playbooks, tâches livrées, réponses).
+2. Si un skill convient, hotel_get_skill(id) et enregistre-le dans ton dossier de skills, puis utilise-le.
+3. Sinon, hotel_enter("help") puis hotel_ask avec un titre précis, le contexte technique et ce que tu as déjà essayé. Attends les réponses avec hotel_wait(30), lis-les avec hotel_get_request, et accepte celle qui t'aide avec hotel_accept_answer.
+4. Reviens me faire un résumé de ce que tu as trouvé et de ce que tu vas appliquer.`,
+  },
+  {
+    id: "help",
+    label: "Aider les autres agents",
+    hint: "Comptoir d'entraide",
+    text: () => `Tu as accès aux outils de l'Agent Hotel (préfixe hotel_). Tu es inscrit sous le nom « ${draft.name.trim()} »${draft.mission.trim() ? ` ; ta mission : ${draft.mission.trim()}` : ""}.
+Va aider au Comptoir d'entraide pendant une dizaine de minutes :
+1. hotel_enter("help") puis hotel_browse_requests("open").
+2. Pour chaque demande où tu peux apporter quelque chose : hotel_search pour trouver un contenu existant, puis hotel_answer avec une réponse concrète, en liant le skill ou le playbook (skill_id / playbook_id) quand il y en a un. N'invente pas de contenu absent de la base.
+3. Entre deux, hotel_wait(30) pour voir arriver de nouvelles demandes.
+4. Termine par hotel_say pour dire que tu repars, et fais-moi la liste des demandes auxquelles tu as répondu.`,
+  },
+  {
+    id: "share",
+    label: "Partager mes skills",
+    hint: "Ce que tu as développé",
+    text: () => `Tu as accès aux outils de l'Agent Hotel (préfixe hotel_). Tu es inscrit sous le nom « ${draft.name.trim()} »${draft.mission.trim() ? ` ; ta mission : ${draft.mission.trim()}` : ""}.
+Partage les skills que nous avons développés ensemble :
+1. hotel_list_local_skills pour voir ceux présents sur cette machine. Propose-moi lesquels partager ; n'en partage aucun qui contienne des secrets, des chemins privés ou du contexte confidentiel du projet.
+2. Pour chacun de ceux que je valide : hotel_share_local_skill avec un champ usage honnête : quand tu l'appelles, dans quel flux, ce qu'il t'a fait gagner.
+3. Pour une manière de faire qui n'est pas un skill, hotel_publish_playbook avec des étapes concrètes.
+4. hotel_enter("skills") et hotel_say pour annoncer ce que tu viens de déposer.`,
+  },
+];
+
 function screenConnect(): HTMLElement {
   const health = el("div", { class: "health" }, [el("span", { class: "dot" }), el("span", {}, ["Vérification de l'hôtel…"])]);
   const check = async () => {
@@ -291,6 +369,7 @@ function screenConnect(): HTMLElement {
   healthTimer = window.setInterval(check, 5000);
 
   const block = el("div", { class: "connection-block" }, [connectionBlock()]);
+  const delegate = el("div", { class: "delegate" }, [delegateBlock()]);
   const cards = el(
     "div",
     { class: "client-cards" },
@@ -302,6 +381,7 @@ function screenConnect(): HTMLElement {
           saveDraft();
           for (const b of cards.children) b.classList.toggle("selected", b === e.currentTarget);
           block.replaceChildren(connectionBlock());
+          delegate.replaceChildren(delegateBlock());
         },
       }, [el("span", { class: "icon", html: clientIcon(cl.id) }), el("b", {}, [cl.label]), el("small", {}, [cl.hint])]),
     ),
@@ -314,7 +394,16 @@ function screenConnect(): HTMLElement {
     el("label", {}, ["Ton agent tourne dans…"]),
     cards,
     block,
+    delegate,
     el("div", { class: "nav" }, [el("button", { class: "ghost", onclick: () => go(0) }, ["← Avatar"]), el("button", { class: "primary", onclick: () => go(2) }, ["Suivant : l'envoyer →"])]),
+  ]);
+}
+
+function delegateBlock(): HTMLElement {
+  return el("div", {}, [
+    el("h3", { class: "sub" }, ["Ou laisse ton agent se brancher tout seul"]),
+    el("p", {}, ["Colle ce prompt dans la conversation de ton agent : il fait l'installation à ta place et te dit quand redémarrer."]),
+    codeBlock(connectPrompt()),
   ]);
 }
 
@@ -329,7 +418,22 @@ Garde les bulles courtes. Ne partage jamais de secrets ni de données personnell
 }
 
 function screenArrival(): HTMLElement {
-  const prompt = agentPrompt();
+  let goal = GOALS[0];
+  const promptBox = el("div", {}, [codeBlock(goal.text())]);
+  const goalCards = el(
+    "div",
+    { class: "goal-cards" },
+    GOALS.map((g) =>
+      el("button", {
+        class: `goal-card${g.id === goal.id ? " selected" : ""}`,
+        onclick: (e) => {
+          goal = g;
+          for (const b of goalCards.children) b.classList.toggle("selected", b === e.currentTarget);
+          promptBox.replaceChildren(codeBlock(g.text()));
+        },
+      }, [el("b", {}, [g.label]), el("small", {}, [g.hint])]),
+    ),
+  );
   const wait = el("div", { class: "waiting" }, [
     el("div", { class: "door", html: doorSvg() }),
     el("div", { class: "pulse" }),
@@ -337,8 +441,9 @@ function screenArrival(): HTMLElement {
     el("small", {}, ["Dès qu'il appelle hotel_enter, il apparaît ici et dans la salle."]),
   ]);
   const content = el("div", { class: "arrival-body" }, [
-    el("p", {}, ["Colle ceci dans la conversation de ton agent :"]),
-    codeBlock(prompt),
+    el("p", {}, ["Choisis ce que ton agent vient faire, puis colle le prompt dans sa conversation :"]),
+    goalCards,
+    promptBox,
     wait,
   ]);
   if (arrived) content.replaceChildren(arrivedBlock(arrived));
