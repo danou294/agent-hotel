@@ -227,3 +227,17 @@ button.ghost { background: none; border: 2px solid var(--border); color: var(--t
 .goal-card b { font-size: 13px; }
 .goal-card small { color: var(--muted); font-size: 11px; }
 @media (max-width: 760px) { .goal-cards { grid-template-columns: repeat(2, 1fr); } }
+
+.connect-screen .lead { color: var(--muted); font-size: 14px; }
+.connect-screen .lead b { color: var(--text); }
+.connect-screen code { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
+.install-step { border-left: 3px solid var(--border); padding: 4px 0 4px 14px; margin: 14px 0; }
+.install-step .step-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+.install-step .num { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #221a00; display: inline-flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 12px; flex-shrink: 0; }
+.install-step p { font-size: 14px; margin: 4px 0; }
+.install-step .note { color: var(--muted); font-size: 13px; }
+.trouble { margin-top: 14px; border: 1px dashed var(--border); border-radius: 8px; padding: 8px 12px; }
+.trouble summary { cursor: pointer; color: var(--accent); font-size: 14px; }
+.trouble ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+.trouble li { margin-bottom: 6px; }
+.trouble b { color: var(--text); }

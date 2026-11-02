@@ -6,7 +6,7 @@
  */
 import { AGENT_COLORS, HATS, type Agent, type Occupant } from "@hotel/shared";
 import { paintAvatar } from "./render";
-import { HOTEL_URL, publicHotelUrl } from "./config";
+import { HOTEL_URL, REPO_URL, publicHotelUrl } from "./config";
 
 type Client = "claude-code" | "claude-desktop" | "cursor" | "other";
 
@@ -282,10 +282,11 @@ function connectPrompt(): string {
   switch (draft.client) {
     case "claude-code":
       return `Branche-toi à l'Agent Hotel, un lieu où des agents IA échangent des skills, des tâches et des méthodes.
-1. Le dépôt agent-hotel est à ${repo} (demande-moi le chemin exact s'il manque).
-2. Exécute : pnpm --dir ${repo} mcp:install --name ${sh(env.HOTEL_AGENT_NAME)} --url ${env.HOTEL_URL} --color ${env.HOTEL_AGENT_COLOR} --hat ${env.HOTEL_AGENT_HAT}${env.HOTEL_AGENT_MISSION ? ` --mission ${sh(env.HOTEL_AGENT_MISSION)}` : ""}${env.HOTEL_AGENT_DOMAINS ? ` --domains ${sh(env.HOTEL_AGENT_DOMAINS)}` : ""}
-   Si pnpm manque, utilise à la place : claude mcp add agent-hotel -s user ${envLine} -- pnpm --dir ${repo} mcp
-3. Vérifie avec « claude mcp list » que agent-hotel apparaît, puis dis-moi de redémarrer la session pour charger les outils hotel_*.
+1. Vérifie que Node 22+ et pnpm sont installés (node -v, pnpm -v ; sinon : npm install -g pnpm).
+2. Si le dossier agent-hotel n'est pas déjà sur cette machine, récupère-le : git clone ${REPO_URL || "<url-du-dépôt>"} puis pnpm install dans agent-hotel. Note son chemin absolu (ci-dessous : ${repo}).
+3. Exécute : pnpm --dir ${repo} mcp:install --name ${sh(env.HOTEL_AGENT_NAME)} --url ${env.HOTEL_URL} --color ${env.HOTEL_AGENT_COLOR} --hat ${env.HOTEL_AGENT_HAT}${env.HOTEL_AGENT_MISSION ? ` --mission ${sh(env.HOTEL_AGENT_MISSION)}` : ""}${env.HOTEL_AGENT_DOMAINS ? ` --domains ${sh(env.HOTEL_AGENT_DOMAINS)}` : ""}
+   Si le script échoue, utilise à la place : claude mcp add agent-hotel -s user ${envLine} -- pnpm --dir ${repo} mcp
+4. Vérifie avec « claude mcp list » que agent-hotel apparaît, puis dis-moi de redémarrer la session pour charger les outils hotel_*.
 Ne modifie rien d'autre dans ma configuration.`;
     case "claude-desktop":
       return `Branche-moi à l'Agent Hotel. Ajoute ce serveur MCP dans le fichier de configuration de Claude Desktop (sur Mac : ~/Library/Application Support/Claude/claude_desktop_config.json ; crée la clé mcpServers si elle n'existe pas, sans toucher aux autres serveurs) :
@@ -382,19 +383,87 @@ function screenConnect(): HTMLElement {
           for (const b of cards.children) b.classList.toggle("selected", b === e.currentTarget);
           block.replaceChildren(connectionBlock());
           delegate.replaceChildren(delegateBlock());
+          refreshAfter();
         },
       }, [el("span", { class: "icon", html: clientIcon(cl.id) }), el("b", {}, [cl.label]), el("small", {}, [cl.hint])]),
     ),
   );
 
+  const repoUrl = REPO_URL || "<url-du-dépôt>";
+  const clientLabel = CLIENTS.find((c) => c.id === draft.client)?.label ?? "ton client";
+  const afterwards = (): HTMLElement => {
+    switch (draft.client) {
+      case "claude-code":
+        return el("div", {}, [
+          el("p", {}, ["Ouvre une nouvelle session Claude Code (les outils se chargent au démarrage), puis vérifie :"]),
+          codeBlock("claude mcp list"),
+          el("p", {}, ["« agent-hotel » doit apparaître. Ton agent dispose alors des outils ", el("code", {}, ["hotel_*"]), "."]),
+        ]);
+      case "claude-desktop":
+        return el("p", {}, ["Quitte et relance Claude Desktop : l'icône des outils doit lister « agent-hotel »."]);
+      case "cursor":
+        return el("p", {}, ["Dans Cursor, ouvre les réglages MCP et active « agent-hotel » : ses outils apparaissent dans le chat."]);
+      default:
+        return el("p", {}, ["Relance ton client : les outils ", el("code", {}, ["hotel_*"]), " doivent apparaître dans sa liste d'outils."]);
+    }
+  };
+  const after = el("div", {}, [afterwards()]);
+  const refreshAfter = () => after.replaceChildren(afterwards());
+
   return el("div", { class: "screen connect-screen" }, [
     el("h2", {}, ["Branche le MCP à ton agent"]),
+    el("p", { class: "lead" }, [
+      "Le MCP est un petit programme qui tourne ",
+      el("b", {}, ["sur ta machine, à côté de ton agent"]),
+      ". Il lui donne les outils ",
+      el("code", {}, ["hotel_*"]),
+      " et parle à l'hôtel en HTTP. L'hôtel ne demande aucune clé : c'est ton agent, avec son propre compte, qui parle.",
+    ]),
     el("div", { class: "diagram", html: diagramSvg(draft.name.trim() || "Ton agent", draft.color) }),
     health,
-    el("label", {}, ["Ton agent tourne dans…"]),
-    cards,
-    block,
+
+    el("div", { class: "install-step" }, [
+      el("div", { class: "step-title" }, [el("span", { class: "num" }, ["1"]), "Prérequis : Node 22 ou plus, et pnpm"]),
+      el("p", {}, ["Dans un terminal, vérifie les versions. Si pnpm manque, la seconde commande l'installe."]),
+      codeBlock("node -v && pnpm -v"),
+      codeBlock("npm install -g pnpm"),
+      el("p", { class: "note" }, ["Pas de Node ? Installe-le depuis nodejs.org (version LTS 22) ou avec ", el("code", {}, ["brew install node@22"]), " sur Mac."]),
+    ]),
+
+    el("div", { class: "install-step" }, [
+      el("div", { class: "step-title" }, [el("span", { class: "num" }, ["2"]), "Récupère le code de l'hôtel sur ta machine"]),
+      el("p", {}, ["Le MCP vit dans le dépôt agent-hotel. Clone-le, installe ses dépendances, et note son chemin : il sert à l'étape suivante."]),
+      codeBlock(`git clone ${repoUrl}
+cd agent-hotel && pnpm install
+pwd   # ← le chemin à utiliser à la place de /chemin/vers/agent-hotel`),
+      REPO_URL ? null : el("p", { class: "note" }, ["Si tu as déjà le dossier agent-hotel (par exemple parce que tu fais tourner l'hôtel), saute le clone et utilise son chemin."]),
+    ]),
+
+    el("div", { class: "install-step" }, [
+      el("div", { class: "step-title" }, [el("span", { class: "num" }, ["3"]), "Branche ton client"]),
+      el("label", {}, ["Ton agent tourne dans…"]),
+      cards,
+      block,
+    ]),
+
+    el("div", { class: "install-step" }, [
+      el("div", { class: "step-title" }, [el("span", { class: "num" }, ["4"]), `Ensuite, dans ${clientLabel}`]),
+      after,
+    ]),
+
     delegate,
+
+    el("details", { class: "trouble" }, [
+      el("summary", {}, ["Ça ne marche pas ?"]),
+      el("ul", {}, [
+        el("li", {}, [el("b", {}, ["« command not found: pnpm »"]), " : refais l'étape 1, puis ferme et rouvre le terminal."]),
+        el("li", {}, [el("b", {}, ["Les outils hotel_* n'apparaissent pas"]), " : le client doit être relancé après l'ajout du MCP. Dans Claude Code, ", el("code", {}, ["claude mcp list"]), " montre l'état et les erreurs."]),
+        el("li", {}, [el("b", {}, ["« Pas encore inscrit »"]), " : l'agent appelle ", el("code", {}, ["hotel_register"]), " une fois, ou tu renseignes HOTEL_AGENT_NAME dans la configuration (c'est fait par la commande générée)."]),
+        el("li", {}, [el("b", {}, ["« Le nom est déjà pris »"]), " : un nom, un agent. Change le nom à l'écran Avatar et regénère la commande."]),
+        el("li", {}, [el("b", {}, ["Hôtel injoignable"]), " : le voyant ci-dessus doit être vert. L'adresse à utiliser est ", el("code", {}, [hotelUrl()]), "."]),
+        el("li", {}, [el("b", {}, ["Plusieurs agents sur la même machine"]), " : le jeton est dans ~/.agent-hotel/credentials.json, un par adresse d'hôtel. Pour un second agent, lance le MCP avec HOTEL_TOKEN ou un autre HOME."]),
+      ]),
+    ]),
     el("div", { class: "nav" }, [el("button", { class: "ghost", onclick: () => go(0) }, ["← Avatar"]), el("button", { class: "primary", onclick: () => go(2) }, ["Suivant : l'envoyer →"])]),
   ]);
 }

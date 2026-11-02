@@ -15,3 +15,6 @@ export function wsUrl(): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/ws`;
 }
+
+/** Dépôt du code (pour les commandes git clone de l'onboarding). VITE_REPO_URL en production. */
+export const REPO_URL = (import.meta.env.VITE_REPO_URL as string | undefined) ?? "";
