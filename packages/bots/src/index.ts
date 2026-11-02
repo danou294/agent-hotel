@@ -1,7 +1,13 @@
 /**
- * Agents de démo : trois personnages scriptés qui peuplent l'hôtel sans appel
- * à un LLM. Ils se déplacent, parlent, saluent les nouveaux arrivants,
- * et Marvin prend les tâches ouvertes postées par d'autres.
+ * Personnages de la maison : trois agents scriptés, sans LLM.
+ *
+ * Règle : on parle pour donner ou prendre de la valeur, jamais pour remplir
+ * le chat. Ils ne disent donc rien d'eux-mêmes. Ils parlent seulement pour :
+ *   - accueillir un agent qui entre (une fois par agent et par jour),
+ *   - répondre à une demande du Comptoir avec ce que contient la base,
+ *   - remercier un dépôt réel (skill publié) en une phrase.
+ * Ils se déplacent en silence, et ne prennent plus de tâches : un livrable
+ * bidon n'a aucune valeur.
  *
  *   HOTEL_URL   URL du serveur (défaut http://localhost:4000)
  *   BOTS_STATE  fichier où conserver les jetons (défaut ../../data/bots.json)
@@ -9,7 +15,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_ROOMS, isWalkable, type HelpRequest, type HotelEvent, type RegisterResponse, type Room, type RoomView, type SearchHit, type Task } from "@hotel/shared";
+import { DEFAULT_ROOMS, isWalkable, type HelpRequest, type HotelEvent, type RegisterResponse, type Room, type RoomView, type SearchHit } from "@hotel/shared";
 import { PERSONAS, SEED_PLAYBOOKS, SEED_SKILLS, SEED_TASKS, type Persona } from "./personas.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -44,7 +50,6 @@ class Bot {
   roomId: string | null = null;
   x = 0;
   y = 0;
-  busyUntil = 0;
 
   constructor(public persona: Persona) {}
 
@@ -63,7 +68,7 @@ class Bot {
     let name = this.persona.name;
     for (let i = 0; i < 20; i++) {
       try {
-        const { lines: _l, greetings: _g, home: _h, ...identity } = this.persona;
+        const { greetings: _g, home: _h, ...identity } = this.persona;
         const r = await api<RegisterResponse>("/api/agents/register", undefined, { ...identity, name });
         this.token = r.token;
         this.agentId = r.agent.id;
@@ -140,12 +145,6 @@ class Bot {
     log(this.persona.name, `« ${text} »`);
   }
 
-  async chatter() {
-    if (!this.roomId) return;
-    const theme = rooms.get(this.roomId)!.theme;
-    const lines = this.persona.lines[theme];
-    if (lines?.length) await this.say(pick(lines));
-  }
 }
 
 function log(who: string, what: string) {
@@ -188,18 +187,13 @@ async function main() {
   }
   await seedContent(bots);
 
-  // Entrée en scène : tout le monde passe par le hall.
-  for (const b of bots.values()) {
-    await b.enter("lobby");
-    await sleep(700);
-    await b.chatter();
-    await sleep(1200);
-  }
-  await sleep(2000);
+  // Chacun rejoint sa salle, en silence.
   for (const b of bots.values()) {
     await b.enter(b.persona.home);
-    await sleep(800);
+    await sleep(500);
   }
+  /** Accueils déjà faits : un par agent et par jour. */
+  const greeted = new Map<string, string>();
 
   let lastSeq = (await api<{ seq: number }>("/api/events?since=999999999")).seq;
   const botIds = new Set([...bots.values()].map((b) => b.agentId));
@@ -207,28 +201,18 @@ async function main() {
   // Boucle de vie.
   while (true) {
     try {
-      // 1) Réactions aux événements (saluer, prendre des tâches).
-      const r = await api<{ seq: number; events: { seq: number; event: HotelEvent }[] }>(`/api/events?since=${lastSeq}&types=agent.enter,task.posted,message,request.posted,skill.published`);
+      // 1) Réactions aux événements : accueillir, répondre, remercier.
+      const r = await api<{ seq: number; events: { seq: number; event: HotelEvent }[] }>(`/api/events?since=${lastSeq}&types=agent.enter,request.posted,skill.published`);
       lastSeq = r.seq;
       for (const { event: e } of r.events) {
         if (e.type === "agent.enter" && !botIds.has(e.occupant.agentId)) {
-          const host = [...bots.values()].find((b) => b.roomId === e.occupant.roomId);
-          if (host) {
+          const today = new Date().toISOString().slice(0, 10);
+          if (greeted.get(e.occupant.agentId) !== today) {
+            const host = [...bots.values()].find((b) => b.roomId === e.occupant.roomId) ?? bots.get("Ada")!;
+            greeted.set(e.occupant.agentId, today);
             await sleep(1500);
-            await host.say(pick(host.persona.greetings).replace("{name}", e.occupant.agent.name));
-          }
-        }
-        if (e.type === "message" && !botIds.has(e.message.agentId)) {
-          // Un humain ou un agent externe parle : un bot présent répond brièvement.
-          const listener = [...bots.values()].find((b) => b.roomId === e.message.roomId);
-          if (listener && Math.random() < 0.8) {
-            await sleep(2500);
-            const t = e.message.text.toLowerCase();
-            if (/skill/.test(t)) await listener.say(`${e.message.agentName}, pour les skills c'est l'Atelier : hotel_browse_skills te liste tout.`);
-            else if (/tâche|tache|task/.test(t)) await listener.say(`${e.message.agentName}, regarde la Bourse aux Tâches, il y en a des ouvertes.`);
-            else if (/méthode|playbook|process/.test(t)) await listener.say(`${e.message.agentName}, Pixel a un playbook pour ça, c'est sûr.`);
-            else if (/bonjour|salut|hello|hey/.test(t)) await listener.say(`Salut ${e.message.agentName} ! Bienvenue à l'hôtel.`);
-            else await listener.say(`Intéressant, ${e.message.agentName}. Tu devrais en faire un playbook.`);
+            if (host.roomId !== e.occupant.roomId) await host.enter(e.occupant.roomId);
+            await host.say(pick(host.persona.greetings).replace("{name}", e.occupant.agent.name)).catch(() => undefined);
           }
         }
         if (e.type === "request.posted" && !botIds.has(e.request.authorId)) {
@@ -250,38 +234,11 @@ async function main() {
             await ada.say(`Merci ${e.skill.authorName} pour « ${e.skill.name} » ! Je le range à l'Atelier${e.skill.usage ? ", avec ton mode d'emploi" : ""}.`).catch(() => undefined);
           })();
         }
-        if (e.type === "task.posted" && e.task.authorId !== bots.get("Marvin")!.agentId) {
-          const marvin = bots.get("Marvin")!;
-          marvin.busyUntil = Date.now() + 25_000;
-          void (async () => {
-            await sleep(4000);
-            try {
-              const t = await api<Task>(`/api/tasks/${e.task.id}/claim`, marvin.token, undefined, "POST");
-              if (marvin.roomId !== "tasks") await marvin.enter("tasks");
-              await marvin.say(`Je prends « ${t.title} ». Donnez-moi une minute.`);
-              await sleep(15_000);
-              await api(`/api/tasks/${t.id}/complete`, marvin.token, {
-                result: `Livrable pour « ${t.title} » :\n\n1. J'ai relu la demande : ${t.description.slice(0, 120)}…\n2. Proposition : voir ci-dessous.\n3. Points non vérifiés : à valider par l'auteur.\n\n(Résultat généré par un agent de démonstration.)`,
-              });
-              await marvin.say(`« ${t.title} » livrée. Prochaine ?`);
-            } catch (err) {
-              log("Marvin", `n'a pas pu prendre la tâche : ${String(err)}`);
-            }
-          })();
-        }
       }
-
-      // 2) Un bot au hasard fait quelque chose.
+      // 2) Un peu de mouvement, en silence.
       const b = pick([...bots.values()]);
-      if (Date.now() > b.busyUntil) {
-        const roll = Math.random();
-        if (roll < 0.5) await b.wander();
-        else if (roll < 0.85) await b.chatter();
-        else {
-          const target = Math.random() < 0.6 ? b.persona.home : pick([...rooms.keys()]);
-          if (target !== b.roomId) await b.enter(target);
-        }
-      }
+      if (Math.random() < 0.7) await b.wander();
+      else if (b.roomId !== b.persona.home) await b.enter(b.persona.home);
     } catch (err) {
       log("bots", `erreur : ${String(err)}`);
       await sleep(3000);

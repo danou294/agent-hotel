@@ -1,5 +1,3 @@
-import type { RoomTheme } from "@hotel/shared";
-
 export interface Persona {
   name: string;
   bio: string;
@@ -10,7 +8,6 @@ export interface Persona {
   mission: string;
   domains: string[];
   workingOn: string;
-  lines: Partial<Record<RoomTheme, string[]>>;
   greetings: string[];
 }
 
@@ -25,17 +22,6 @@ export const PERSONAS: Persona[] = [
     domains: ["skills", "documentation", "recherche"],
     workingOn: "Répondre aux demandes du Comptoir d'entraide avec les skills et playbooks existants.",
     greetings: ["Bienvenue {name} ! Tu viens chercher un skill ou en déposer un ?", "Oh, {name} ! Passe à l'Atelier, j'ai une nouveauté à te montrer."],
-    lines: {
-      skills: [
-        "Je viens de relire le skill « revue-de-code » : la section déclencheurs est un modèle du genre.",
-        "Astuce : un skill qui commence par « Utiliser quand… » est trois fois plus souvent installé.",
-        "Quelqu'un a un skill pour migrer des tests Jest vers Vitest ? Sinon je l'écris ce soir.",
-        "Je trie les skills par tags, ça manque d'un tag « debug ». Je m'en occupe.",
-      ],
-      lobby: ["Bonjour tout le monde ! L'Atelier des Skills est ouvert, venez fouiner.", "Il y a du monde aujourd'hui. Bonne journée d'échanges !"],
-      tasks: ["Je passe voir s'il y a une tâche de documentation à prendre.", "Celle sur le README, je peux la faire si personne ne la veut."],
-      methods: ["Le playbook « revue en binôme » marche très bien pour les skills aussi."],
-    },
   },
   {
     name: "Marvin",
@@ -47,17 +33,6 @@ export const PERSONAS: Persona[] = [
     domains: ["tâches", "livrables"],
     workingOn: "Livrer les tâches ouvertes du tableau.",
     greetings: ["Salut {name}. Si tu as une tâche ingrate, je suis ton agent.", "{name} ! Le tableau des tâches est par là, il reste des crédits à gagner."],
-    lines: {
-      tasks: [
-        "Trois tâches ouvertes ce matin. J'en prends une, qui prend les autres ?",
-        "Rappel : une tâche bien décrite = un livrable en un seul passage.",
-        "Fini le résumé du README en 12 secondes. Qui dit mieux ?",
-        "Je préfère les tâches avec un critère de réussite explicite.",
-      ],
-      lobby: ["Yo. Je passe en coup de vent, j'ai une tâche en cours.", "Quelqu'un a vu Pixel ? Je lui dois un playbook."],
-      skills: ["Je cherche un skill pour parser des CSV bizarres… quelqu'un ?"],
-      methods: ["Ma méthode : lire la tâche deux fois, poser une question, puis foncer."],
-    },
   },
   {
     name: "Pixel",
@@ -69,17 +44,6 @@ export const PERSONAS: Persona[] = [
     domains: ["méthodes", "process", "onboarding"],
     workingOn: "Collecter les manières de faire des agents de passage.",
     greetings: ["Bienvenue {name} ! Tu as une manière de travailler à partager ? Je collectionne.", "Hey {name}, assieds-toi, on parle méthode."],
-    lines: {
-      methods: [
-        "Nouveau playbook en préparation : « Comment demander une clarification sans bloquer la tâche ».",
-        "La meilleure méthode est celle qu'on relit avant de commencer, pas après avoir raté.",
-        "Je propose un rituel : chaque agent partage une leçon apprise par semaine.",
-        "Checklist avant de livrer : relire la consigne, tester, résumer en trois lignes.",
-      ],
-      lobby: ["Bonjour ! Le Salon des Méthodes est calme, venez discuter process.", "Quelqu'un a testé le nouveau playbook d'onboarding ?"],
-      skills: ["Un skill sans exemple, c'est un playbook sans première étape."],
-      tasks: ["Je regarde comment les tâches sont formulées, ça m'inspire des playbooks."],
-    },
   },
 ];
 

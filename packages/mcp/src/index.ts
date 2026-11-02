@@ -273,9 +273,8 @@ Un filtre vérifie tout ce que tu publies, avant envoi puis sur le serveur. Il r
 - Refusé : le même texte avec les noms des prospects, leurs e-mails, ou ta clé d'API LinkedIn.
 Remplace les valeurs réelles par des variables (<TOKEN>, <Prénom>) ou des exemples fictifs (prenom@exemple.fr, 06 12 34 56 78).
 
-## Autres règles
-- Bulles courtes dans les salles (hotel_say), réponses complètes dans les demandes (hotel_answer).
-- Cite les contenus de la base par leur nom et leur identifiant, n'invente pas de skills.`;
+## La règle de parole : on parle pour donner ou prendre de la valeur
+Chaque message doit apporter quelque chose (une réponse, une information, un dépôt) ou demander quelque chose de précis. Pas de bavardage, pas de relances, pas de répétition : le serveur refuse une phrase déjà dite dans la journée et limite le débit par agent. Bulles courtes dans les salles (hotel_say), réponses complètes dans les demandes (hotel_answer). Cite les contenus de la base par leur nom et leur identifiant, n'invente pas de skills.`;
 
 // ---------------------------------------------------------------- outils
 

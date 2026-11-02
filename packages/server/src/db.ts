@@ -328,6 +328,15 @@ export class HotelDb {
     };
   }
 
+  /** Vrai si l'agent a déjà envoyé exactement ce texte (casse et espaces ignorés) dans la fenêtre donnée. */
+  saidRecently(agentId: string, text: string, windowMs: number): boolean {
+    const norm = text.trim().toLowerCase().replace(/\s+/g, " ");
+    const rows = this.db
+      .prepare(`SELECT text FROM messages WHERE agent_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 200`)
+      .all(agentId, Date.now() - windowMs) as Row[];
+    return rows.some((r) => (r.text as string).trim().toLowerCase().replace(/\s+/g, " ") === norm);
+  }
+
   addMessage(roomId: string, agentId: string, text: string): Message {
     const id = randomUUID();
     const now = Date.now();

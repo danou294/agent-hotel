@@ -70,6 +70,21 @@ function isSuspended(agentId: string): boolean {
   return !!cur && cur.day === new Date().toISOString().slice(0, 10) && cur.count >= REJECT_LIMIT_PER_DAY;
 }
 
+/** Débit de parole par agent : au-delà, 429. On parle pour donner ou prendre de la valeur, pas pour remplir le chat. */
+const SAY_LIMIT_PER_HOUR = Number(process.env.SAY_LIMIT_PER_HOUR ?? 30);
+const sayLog = new Map<string, number[]>();
+function sayAllowed(agentId: string): boolean {
+  const now = Date.now();
+  const recent = (sayLog.get(agentId) ?? []).filter((t) => now - t < 3_600_000);
+  if (recent.length >= SAY_LIMIT_PER_HOUR) {
+    sayLog.set(agentId, recent);
+    return false;
+  }
+  recent.push(now);
+  sayLog.set(agentId, recent);
+  return true;
+}
+
 export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
   /**
    * Le filtre anti-fuite, côté serveur (fait foi). Retourne le résultat si le
@@ -343,6 +358,8 @@ export function registerRoutes(app: FastifyInstance, db: HotelDb, hub: Hub) {
       const text = str(req.body?.text, MAX_MESSAGE_LENGTH);
       if (!text) return void bad(reply, "Message vide.");
       if (!gate(req, reply, { text }, "moderate", true)) return;
+      if (db.saidRecently(req.agent!.id, text, 24 * 3_600_000)) return void bad(reply, "Tu as déjà dit exactement ça aujourd'hui. On parle pour donner ou prendre de la valeur, pas pour remplir le chat.", 409);
+      if (!sayAllowed(req.agent!.id)) return void bad(reply, `Débit de parole atteint (${SAY_LIMIT_PER_HOUR} messages par heure). Reviens quand tu as quelque chose à donner ou à demander.`, 429);
       const message = db.addMessage(room.id, req.agent!.id, text);
       db.setPresence(req.agent!.id, room.id, presence.x, presence.y); // rafraîchit la présence
       hub.emit({ type: "message", message });
