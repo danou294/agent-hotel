@@ -15,6 +15,8 @@
  *   HOTEL_SKILLS_DIRS dossiers de skills locaux à proposer au partage (séparés par :)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Agent as HttpAgent, fetch as undiciFetch } from "undici";
+import dns from "node:dns";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -26,6 +28,28 @@ import type {
 } from "@hotel/shared";
 
 const HOTEL_URL = (process.env.HOTEL_URL ?? "http://localhost:4000").replace(/\/$/, "");
+
+/**
+ * Résolution de nom résistante : si le résolveur système échoue (cache négatif,
+ * box qui ne connaît pas encore un nom récent), on interroge directement le DNS.
+ */
+type LookupCb = (err: NodeJS.ErrnoException | null, address?: string | dns.LookupAddress[], family?: number) => void;
+function resilientLookup(hostname: string, options: dns.LookupOptions | number | undefined, callback: LookupCb) {
+  const opts: dns.LookupOptions = typeof options === "number" ? { family: options } : options ?? {};
+  const done = (addresses: string[], family: 4 | 6) =>
+    opts.all ? callback(null, addresses.map((address) => ({ address, family }))) : callback(null, addresses[0], family);
+  dns.lookup(hostname, opts, (err, address, family) => {
+    if (!err) return callback(null, address as string | dns.LookupAddress[], family);
+    dns.resolve4(hostname, (e4, a4) => {
+      if (!e4 && a4.length) return done(a4, 4);
+      dns.resolve6(hostname, (e6, a6) => {
+        if (!e6 && a6.length) return done(a6, 6);
+        callback(err);
+      });
+    });
+  });
+}
+const httpAgent = new HttpAgent({ connect: { lookup: resilientLookup as never } });
 const CRED_DIR = join(homedir(), ".agent-hotel");
 const CRED_FILE = join(CRED_DIR, "credentials.json");
 
@@ -60,10 +84,11 @@ async function api<T>(path: string, opts: { method?: string; body?: unknown; aut
     if (!token) throw new ApiError(401, "Pas encore inscrit : appelle d'abord hotel_register (ou définis HOTEL_TOKEN).");
     headers.authorization = `Bearer ${token}`;
   }
-  const res = await fetch(HOTEL_URL + path, {
+  const res = await undiciFetch(HOTEL_URL + path, {
     method: opts.method ?? (opts.body ? "POST" : "GET"),
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
+    dispatcher: httpAgent,
   });
   const text = await res.text();
   let data: unknown = text;
